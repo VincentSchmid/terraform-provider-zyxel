@@ -1,11 +1,10 @@
 # Terraform provider for Zyxel routers
 
-A Terraform provider for the Zyxel AX7501-B0 (Digi ISP firmware `V5.17(ABWW.8)D0`),
-talking directly to the router's encrypted `DAL` HTTP API. No CLI, Python, or
-separate agent is needed at runtime.
+A Terraform provider for Zyxel routers, talking directly to the router's
+encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime.
 
 > **Status: experimental.** Read paths and the mock-router lifecycle tests pass,
-> and a read-only `terraform plan` has been verified against the router above.
+> and a read-only `terraform plan` has been verified against a physical router.
 > **Live writes (NAT, DHCP, firewall ACL) have not been verified on hardware.**
 > Review every plan before applying, and keep a router configuration backup.
 
@@ -16,7 +15,9 @@ separate agent is needed at runtime.
 
 ## Installation
 
-Once the provider is published, declare it in your configuration:
+The provider is published on the
+[Terraform Registry](https://registry.terraform.io/providers/VincentSchmid/zyxel/latest).
+Declare it in your configuration:
 
 ```hcl
 terraform {
@@ -29,24 +30,14 @@ terraform {
 }
 ```
 
-While it is unpublished, build it locally and point Terraform at the binary with
-a development override:
+Then install the provider:
 
 ```sh
-go build -o bin/terraform-provider-zyxel .
+terraform init
 ```
 
-```hcl
-# ~/.terraformrc, or the file in TF_CLI_CONFIG_FILE
-provider_installation {
-  dev_overrides {
-    "registry.terraform.io/VincentSchmid/zyxel" = "/absolute/path/to/bin"
-  }
-  direct {}
-}
-```
-
-Terraform prints a warning about the override on every command; it is expected.
+No local build or development override is needed. If you previously configured
+a `dev_overrides` entry for this provider, remove it to use the published binary.
 
 ## Provider configuration
 
@@ -87,7 +78,9 @@ several Terraform processes against the router at the same time.
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
 | `zyxel_acl_rule` | resource | IPv4 TCP WAN-to-LAN firewall ACL entry |
 
-Full documentation is in [`docs/`](docs), with examples in [`examples/`](examples).
+Full documentation is on the
+[Terraform Registry](https://registry.terraform.io/providers/VincentSchmid/zyxel/latest/docs)
+and in [`docs/`](docs), with examples in [`examples/`](examples).
 
 ## Example
 
@@ -160,6 +153,8 @@ list is read at plan time, plan output changes when Cloudflare updates it.
 
 ## Development
 
+### Build and test
+
 ```sh
 go build ./...       # build the provider
 go vet ./...         # static checks
@@ -183,10 +178,33 @@ go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs generate --pr
 
 No section of this provider opens a `.env` file or reads credentials from disk.
 
+### Run a local build
+
+To test provider changes instead of the published binary, build it locally:
+
+```sh
+go build -o bin/terraform-provider-zyxel .
+```
+
+Point Terraform at the directory containing the binary with a development override:
+
+```hcl
+# ~/.terraformrc, or the file in TF_CLI_CONFIG_FILE
+provider_installation {
+  dev_overrides {
+    "registry.terraform.io/VincentSchmid/zyxel" = "/absolute/path/to/bin"
+  }
+  direct {}
+}
+```
+
+Terraform prints a warning about the override on every command; it is expected.
+Remove the override when you want to use the published provider again.
+
 ## Releasing
 
-See [PUBLISHING.md](PUBLISHING.md) for the signing key, the release workflow, and
-publishing to the Terraform Registry.
+See [PUBLISHING.md](PUBLISHING.md) for the release workflow, signing key setup,
+and how new versions reach the Terraform Registry.
 
 ## License
 

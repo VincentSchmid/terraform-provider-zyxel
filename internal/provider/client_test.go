@@ -82,7 +82,7 @@ func TestReadStatusUsesHybridLoginAndLogsOut(t *testing.T) {
 		if cookie, err := r.Cookie("router"); err != nil || cookie.Value != "session" {
 			t.Errorf("session cookie missing on status read")
 		}
-		writeEncrypted(t, w, aesKey, map[string]any{"result": dalResult, "Object": []any{map[string]any{"DeviceInfo": map[string]any{"ModelName": "AX7501-B0", "SoftwareVersion": "V5.17"}, "SystemInfo": map[string]any{"HostName": "router"}}}})
+		writeEncrypted(t, w, aesKey, map[string]any{"result": dalResult, "Object": []any{map[string]any{"DeviceInfo": map[string]any{"ModelName": "Zyxel-Test", "SoftwareVersion": "test-firmware"}, "SystemInfo": map[string]any{"HostName": "router"}}}})
 	})
 	mux.HandleFunc("/cgi-bin/UserLogout", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("sessionkey") != sessionKey {
@@ -105,7 +105,7 @@ func TestReadStatusUsesHybridLoginAndLogsOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status["DeviceInfo"].(map[string]any)["ModelName"] != "AX7501-B0" {
+	if status["DeviceInfo"].(map[string]any)["ModelName"] != "Zyxel-Test" {
 		t.Fatalf("unexpected status: %#v", status)
 	}
 	if !loggedOut {

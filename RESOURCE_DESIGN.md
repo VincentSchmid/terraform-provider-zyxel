@@ -254,8 +254,9 @@ router `Index` as a durable identifier.
   or toggles until their write contracts and state exposure are understood.
 - ISP provisioning, reboot/reset/backup actions: outside this first resource
   plan. Nothing in the current scope warrants raw write access.
-- Remote state and published provider distribution: choose these after the
-  local client and initial resource design are accepted.
+- Remote state: choose a backend after the local client and initial resource
+  design are accepted. Provider distribution is now available through the
+  [Terraform Registry](https://registry.terraform.io/providers/VincentSchmid/zyxel/latest).
 
 ## Example target shape
 

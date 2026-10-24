@@ -1,11 +1,51 @@
 # Publishing this provider
 
-The [Terraform Registry](https://registry.terraform.io) publishes any public
-GitHub repository named `terraform-provider-<type>`. This repository is
-`VincentSchmid/terraform-provider-zyxel`, so the provider address is
-`VincentSchmid/zyxel` on `registry.terraform.io`.
+The provider is published on the
+[Terraform Registry](https://registry.terraform.io/providers/VincentSchmid/zyxel/latest)
+as `VincentSchmid/zyxel`, with `0.1.0` as the first published version. It is
+backed by `VincentSchmid/terraform-provider-zyxel` on GitHub. New signed GitHub
+releases are ingested automatically; the one-time registry setup is complete.
+
+## Releasing a version
+
+1. Make sure `main` builds, tests pass, and the docs are regenerated.
+2. Choose a new, unused semantic version, then tag the release commit and push it.
+   For example, for the next patch release:
+
+   ```sh
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+   There must be no branch with the same name as the tag. Pushing to `main`
+   alone does not publish a provider version.
+
+3. The `release` workflow runs GoReleaser, which builds every platform, writes
+   `terraform-provider-zyxel_<version>_SHA256SUMS` plus its `.sig`, attaches
+   `terraform-provider-zyxel_<version>_manifest.json`, and publishes the GitHub
+   release. Nothing is left to click: `.goreleaser.yml` sets `release.draft:
+   false`, and the registry only ingests finalized releases.
+4. To check a release after the fact:
+
+   ```sh
+   gh release download v<version> -p '*SHA256SUMS*' -p '*manifest.json'
+   gpg --verify terraform-provider-zyxel_<version>_SHA256SUMS.sig \
+                terraform-provider-zyxel_<version>_SHA256SUMS
+   ```
+
+   The signature must come from the key registered with the registry.
+5. The new version should appear in the registry within a few minutes. In a
+   Terraform configuration that declares `VincentSchmid/zyxel` with a version
+   constraint allowing the new release, check installation with:
+
+   ```sh
+   terraform init -upgrade
+   ```
 
 ## One-time setup
+
+This setup is already complete for this repository. These steps are retained
+for signing-key rotation, recovery, or publishing a fork under a new namespace.
 
 ### 1. Create a signing key
 
@@ -44,38 +84,6 @@ and confirm. The registry creates a `release` webhook on the repository that
 ingests future versions automatically. (If the webhook breaks, remove it and use
 **Resync** on the provider settings page.)
 
-## Releasing a version
-
-1. Make sure `main` builds, tests pass, and the docs are regenerated.
-2. Tag a semantic version and push it:
-
-   ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-
-   There must be no branch with the same name as the tag.
-
-3. The `release` workflow runs GoReleaser, which builds every platform, writes
-   `terraform-provider-zyxel_<version>_SHA256SUMS` plus its `.sig`, attaches
-   `terraform-provider-zyxel_<version>_manifest.json`, and publishes the GitHub
-   release. Nothing is left to click: `.goreleaser.yml` sets `release.draft:
-   false`, and the registry only ingests finalized releases.
-4. To check a release after the fact:
-
-   ```sh
-   gh release download v<version> -p '*SHA256SUMS*' -p '*manifest.json'
-   gpg --verify terraform-provider-zyxel_<version>_SHA256SUMS.sig \
-                terraform-provider-zyxel_<version>_SHA256SUMS
-   ```
-
-   The signature must come from the key registered with the registry.
-5. Version `0.1.0` appears in the registry within a few minutes. Check it with:
-
-   ```sh
-   terraform init   # required_providers { zyxel = { source = "VincentSchmid/zyxel" } }
-   ```
-
 ## What a release must contain
 
 GoReleaser produces this layout automatically; it is listed so you can check a
@@ -111,7 +119,10 @@ after the registry has ingested a version, always release a new version instead.
 - **Tags are immutable in the registry.** Deleting the GitHub release does not
   remove the registry version.
 - **Docs come from `docs/`.** `index.md` is the provider overview, and one page
-  per resource and data source is required for a complete listing.
+  per resource and data source is required for a complete listing. Each page
+  must start with YAML front matter enclosed by `---` lines. Registry docs
+  come from the version's Git tag; changes on `main` require a new release
+  before they appear in the registry.
 - **Alternative registries.** The [OpenTofu Registry](https://registry.opentofu.org)
   ingests the same GitHub releases automatically, so OpenTofu users can consume
   the provider without extra work.
