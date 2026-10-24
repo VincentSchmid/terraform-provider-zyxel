@@ -1,7 +1,7 @@
 name: release
 
-# Builds, signs, and drafts a GitHub release for every semver tag.
-# The Terraform Registry ingests the release once it is published (not draft).
+# Builds, signs, and publishes a GitHub release for every semver tag.
+# The Terraform Registry ingests the release once it exists (not a draft).
 on:
   push:
     tags:

@@ -57,11 +57,19 @@ ingests future versions automatically. (If the webhook breaks, remove it and use
    There must be no branch with the same name as the tag.
 
 3. The `release` workflow runs GoReleaser, which builds every platform, writes
-   `terraform-provider-zyxel_<version>_SHA256SUMS` plus its `.sig`, includes
-   `terraform-provider-zyxel_<version>_manifest.json`, and uploads a **draft**
-   GitHub release.
-4. Review the draft assets and signature, then publish the release. The
-   registry only ingests finalized releases, so a draft stays invisible.
+   `terraform-provider-zyxel_<version>_SHA256SUMS` plus its `.sig`, attaches
+   `terraform-provider-zyxel_<version>_manifest.json`, and publishes the GitHub
+   release. Nothing is left to click: `.goreleaser.yml` sets `release.draft:
+   false`, and the registry only ingests finalized releases.
+4. To check a release after the fact:
+
+   ```sh
+   gh release download v<version> -p '*SHA256SUMS*' -p '*manifest.json'
+   gpg --verify terraform-provider-zyxel_<version>_SHA256SUMS.sig \
+                terraform-provider-zyxel_<version>_SHA256SUMS
+   ```
+
+   The signature must come from the key registered with the registry.
 5. Version `0.1.0` appears in the registry within a few minutes. Check it with:
 
    ```sh
@@ -70,8 +78,8 @@ ingests future versions automatically. (If the webhook breaks, remove it and use
 
 ## What a release must contain
 
-GoReleaser already produces this layout; it is listed so you can verify a draft
-release before publishing:
+GoReleaser produces this layout automatically; it is listed so you can check a
+release after it is published:
 
 - `terraform-provider-zyxel_<version>_<os>_<arch>.zip` per platform, each
   containing a binary named `terraform-provider-zyxel_v<version>`
@@ -86,6 +94,15 @@ release before publishing:
 Platforms follow the recommended Terraform combinations: `linux`, `darwin`,
 `windows`, and `freebsd` on `amd64`, `arm64`, `386`, and `arm` (except
 `darwin/386`).
+
+## When the registry reports a version problem
+
+The registry rejects a release that is still a draft, is not signed with a
+registered key, or lacks `terraform-provider-zyxel_<version>_manifest.json` as
+an **asset**. `checksum.extra_files` only adds a file to `SHA256SUMS`; the asset
+itself comes from `release.extra_files` in `.goreleaser.yml`. If a release is
+wrong, delete the release and the tag and push the tag again at a fixed commit —
+after the registry has ingested a version, always release a new version instead.
 
 ## Notes
 
