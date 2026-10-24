@@ -1,0 +1,21 @@
+# Built provider binaries
+bin/
+dist/
+
+# Local Terraform development artifacts
+.terraform/
+.terraform.lock.hcl
+.terraform-mirror/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+dev.tfrc
+
+# Local environment and editor files
+.env
+.env.*
+.DS_Store
+.idea/
+.vscode/

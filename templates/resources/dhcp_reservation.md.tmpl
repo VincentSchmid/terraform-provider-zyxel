@@ -1,0 +1,44 @@
+---
+page_title: "{{.Name}} Resource - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{ .Description | plainmarkdown | trimspace | prefixlines "  " }}
+---
+
+# {{.Name}} (Resource)
+
+{{ .Description | trimspace }}
+
+Reservations are created enabled on the LAN bridge (`BrWan = "Default"`).
+Only `enabled = true` is supported in configuration. The router's observed
+enabled state is refreshed, so external disabling is detected as drift.
+
+Every configurable change requires replacement. Replacement deletes the old
+reservation before creating its successor, so a creation failure can leave
+it absent. Do not use `create_before_destroy` when retaining the same MAC.
+
+## Example Usage
+
+{{ tffile (printf "examples/resources/%s/resource.tf" .Name) }}
+
+{{ .SchemaMarkdown | trimspace }}
+
+## Import
+
+Import by MAC address. Colon- or hyphen-separated six-byte MAC notation is
+normalized to uppercase colon-separated form; use that canonical form in
+configuration.
+
+```shell
+terraform import zyxel_dhcp_reservation.nas '02:00:00:00:00:20'
+```
+
+An existing reservation must be imported before Terraform creates it.
+Multiple rows matching the same MAC are an error; the provider never chooses
+one arbitrarily. Missing rows leave state on refresh, and deletion of an
+already absent reservation succeeds. Router row indexes are refreshed before
+deletion rather than retained as identity.
+
+Operations sharing a provider client are serialized. Separate Terraform
+processes and router UI edits still require coordination. Local encrypted
+mock tests cover this lifecycle; live DHCP writes remain unverified.

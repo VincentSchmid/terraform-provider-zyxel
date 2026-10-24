@@ -1,0 +1,57 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown}}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description}}
+
+## Example Usage
+
+{{tffile .ExampleFile}}
+
+The provider creates enabled IPv4 forwarding rules. `enabled` reports the
+observed router setting; enable/disable configuration and WAN interface
+selection are not supported in this increment. Creation sends the CLI's
+supported fields and lets the router choose defaults for omitted settings.
+Replacing an imported rule does not preserve interface selection or other
+settings outside this resource's schema. `protocol` accepts `tcp`,
+`udp`, `both`, or `all`, which map to `TCP`, `UDP`, `TCP+UDP`, and `ALL` on
+the router. `all` forwards every protocol, so it is broader than `both`.
+Specify both bounds even for a single port. Internal and external ranges
+must have the same length.
+
+## Identity and changes
+
+The exact rule `name` maps to the router's `Description` and must be unique.
+Existing rules with that name must be imported; Create never adopts them.
+Duplicate matches fail without changing the router. The computed
+`router_index` is an observed locator, not the Terraform identity. Delete
+reads the table again and resolves the name to its current index.
+
+Every configurable change replaces the rule because in-place updates have
+not been verified. Replacement normally deletes the old rule before creating
+the new one, so forwarding is interrupted and a failed creation may leave
+the rule absent. Do not use `create_before_destroy` when the name or external
+ports overlap.
+
+Create rejects overlap with enabled rules using the same external ports and
+an intersecting protocol, regardless of WAN interface. This conservative check
+can reject combinations the router might otherwise allow. `both` and `all`
+intersect every protocol. A client lock
+serializes this provider's operations; it cannot coordinate other Terraform
+processes or router UI edits.
+
+The implementation is verified against local encrypted mock servers. Live
+NAT creation and deletion have not been verified on hardware.
+
+{{.SchemaMarkdown | trimspace}}
+
+## Import
+
+Import uses the exact, unique rule description, including its case:
+
+{{codefile "shell" .ImportFile}}
