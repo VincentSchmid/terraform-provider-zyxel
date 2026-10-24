@@ -58,8 +58,13 @@ signs:
       - "${artifact}"
 
 release:
-  # Publish the draft by hand after checking the assets and signature.
-  draft: true
+  # Attach the registry manifest as an asset (checksum.extra_files only adds it
+  # to the checksum list).
+  extra_files:
+    - glob: "terraform-registry-manifest.json"
+      name_template: "{{ .ProjectName }}_{{ .Version }}_manifest.json"
+  # Publish immediately; the registry only ingests finalized releases.
+  draft: false
 
 changelog:
   disable: true
