@@ -9,7 +9,7 @@ import (
 
 func TestACLRulePayloadUsesScriptProfile(t *testing.T) {
 	rule := testACLRule("payload", "accept", 42)
-	payload, err := rule.dalPayload()
+	payload, err := rule.dalPayload(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,7 +17,7 @@ func TestACLRulePayloadUsesScriptProfile(t *testing.T) {
 		"Enable": true, "Name": "payload", "Interface": "ALL", "Order": int64(42),
 		"Target": "Accept", "IPVersion": "IPv4", "SourceIP": "198.51.100.0", "SourceMask": "24",
 		"MACAddress": "AnyMACAddress", "DestIP": "203.0.113.10", "DestMask": "32",
-		"X_ZYXEL_ServiceIndex": 0, "Direction": "WAN_TO_LAN", "X_ZYXEL_ScheduleRule": "",
+		"X_ZYXEL_ServiceIndex": int64(0), "Direction": "WAN_TO_LAN", "X_ZYXEL_ScheduleRule": "",
 		"Protocol": "TCP", "SourcePort": int64(-1), "SourcePortRangeMax": int64(-1),
 		"DestPort": int64(443), "DestPortRangeMax": int64(443), "IPv6header": "", "IPv6headertypes": "",
 	}
@@ -28,7 +28,7 @@ func TestACLRulePayloadUsesScriptProfile(t *testing.T) {
 	}
 	rule.Action = "drop"
 	rule.SourcePortStart, rule.SourcePortEnd = int64Pointer(1024), int64Pointer(2048)
-	payload, err = rule.dalPayload()
+	payload, err = rule.dalPayload(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,12 +40,80 @@ func TestACLRulePayloadUsesScriptProfile(t *testing.T) {
 	}
 	rule.Action = "accept"
 	rule.RateLimit, rule.RateLimitUnit = int64Pointer(100), "second"
-	payload, err = rule.dalPayload()
+	payload, err = rule.dalPayload(0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if payload["LimitRate"] != int64(100) || payload["LimitRateUnit"] != "second" {
 		t.Fatalf("unexpected rate limit payload: %#v", payload)
+	}
+}
+
+func TestACLRulePayloadMapsProtocols(t *testing.T) {
+	cases := map[string]string{
+		"all": "ALL", "tcp_udp": "TCPUDP", "tcp": "TCP",
+		"udp": "UDP", "icmp": "ICMP", "icmpv6": "ICMPv6",
+	}
+	for protocol, routerValue := range cases {
+		t.Run(protocol, func(t *testing.T) {
+			rule := testACLRule("protocol", "accept", 42)
+			rule.Protocol = protocol
+			if protocol != "tcp" && protocol != "udp" && protocol != "tcp_udp" {
+				rule.DestinationPortStart, rule.DestinationPortEnd = nil, nil
+			}
+			payload, err := rule.dalPayload(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if payload["Protocol"] != routerValue {
+				t.Fatalf("payload Protocol = %#v, want %#v", payload["Protocol"], routerValue)
+			}
+			if protocol != "tcp" && protocol != "udp" && protocol != "tcp_udp" {
+				if payload["SourcePort"] != int64(-1) || payload["DestPort"] != int64(-1) {
+					t.Fatalf("portless protocol should send -1 ports: %#v", payload)
+				}
+			}
+		})
+	}
+}
+
+func TestACLRulePayloadMapsFilterFields(t *testing.T) {
+	rule := testACLRule("filters", "reject", 42)
+	rule.Service = "custom-https"
+	rule.IPVersion = "ipv6"
+	rule.SourceCIDR = "2001:db8::/32"
+	rule.DestinationCIDR = "2001:db8:1::/64"
+	rule.MACAddress = "aa:bb:cc:dd:ee:ff"
+	rule.Direction = "lan_to_wan"
+	rule.TCPFlag = "syn"
+	payload, err := rule.dalPayload(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"Target": "Reject", "IPVersion": "IPv6",
+		"SourceIP": "2001:db8::", "SourceMask": "32",
+		"DestIP": "2001:db8:1::", "DestMask": "64",
+		"MACAddress": "AA:BB:CC:DD:EE:FF", "Direction": "LAN_TO_WAN",
+		"X_ZYXEL_ServiceIndex": int64(3), "TCPFlag": "SYN",
+	}
+	for key, expected := range want {
+		if payload[key] != expected {
+			t.Errorf("payload[%q] = %#v, want %#v", key, payload[key], expected)
+		}
+	}
+	rule.MACAddress, rule.TCPFlag, rule.Service = "", "", ""
+	rule.Action, rule.IPVersion, rule.Direction = "accept", "", ""
+	rule.SourceCIDR, rule.DestinationCIDR = "0.0.0.0/0", "203.0.113.10/32"
+	payload, err = rule.dalPayload(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["MACAddress"] != "AnyMACAddress" || payload["IPVersion"] != "IPv4" || payload["Direction"] != "WAN_TO_LAN" {
+		t.Fatalf("unexpected default filter payload: %#v", payload)
+	}
+	if _, exists := payload["TCPFlag"]; exists {
+		t.Fatalf("empty TCP flag must be omitted: %#v", payload)
 	}
 }
 
@@ -56,20 +124,42 @@ func TestACLRulePayloadRejectsInvalidCIDRsAndRanges(t *testing.T) {
 	}{
 		{"noncanonical source CIDR", func(r *ACLRule) { r.SourceCIDR = "198.51.100.1/24" }},
 		{"IPv6 destination", func(r *ACLRule) { r.DestinationCIDR = "2001:db8::1/128" }},
-		{"reversed destination ports", func(r *ACLRule) { r.DestinationPortStart, r.DestinationPortEnd = 5000, 4999 }},
-		{"out of range destination port", func(r *ACLRule) { r.DestinationPortEnd = 65536 }},
+		{"reversed destination ports", func(r *ACLRule) {
+			r.DestinationPortStart, r.DestinationPortEnd = int64Pointer(5000), int64Pointer(4999)
+		}},
+		{"out of range destination port", func(r *ACLRule) { r.DestinationPortEnd = int64Pointer(65536) }},
+		{"partial destination port pair", func(r *ACLRule) { r.DestinationPortEnd = nil }},
+		{"unknown protocol", func(r *ACLRule) { r.Protocol = "sctp" }},
+		{"destination ports on ICMP", func(r *ACLRule) { r.Protocol = "icmp" }},
+		{"source ports on ALL", func(r *ACLRule) {
+			r.Protocol = "all"
+			r.SourcePortStart, r.SourcePortEnd = int64Pointer(1024), int64Pointer(2048)
+		}},
 		{"partial source port pair", func(r *ACLRule) { r.SourcePortStart = int64Pointer(1024) }},
 		{"reversed source ports", func(r *ACLRule) { r.SourcePortStart, r.SourcePortEnd = int64Pointer(2048), int64Pointer(1024) }},
 		{"zero rate limit", func(r *ACLRule) { r.RateLimit = int64Pointer(0) }},
 		{"rate limit above maximum", func(r *ACLRule) { r.RateLimit = int64Pointer(513) }},
 		{"invalid rate limit unit", func(r *ACLRule) { r.RateLimit, r.RateLimitUnit = int64Pointer(100), "hour" }},
 		{"rate limit on drop action", func(r *ACLRule) { r.Action, r.RateLimit = "drop", int64Pointer(100) }},
+		{"reject rate limit", func(r *ACLRule) { r.Action, r.RateLimit = "reject", int64Pointer(100) }},
+		{"unknown action", func(r *ACLRule) { r.Action = "log" }},
+		{"unknown direction", func(r *ACLRule) { r.Direction = "sideways" }},
+		{"invalid IP version", func(r *ACLRule) { r.IPVersion = "ipx" }},
+		{"IPv4 CIDR with IPv6 version", func(r *ACLRule) { r.IPVersion = "ipv6" }},
+		{"malformed MAC address", func(r *ACLRule) { r.MACAddress = "AA:BB:CC:DD:EE" }},
+		{"TCP flag on UDP", func(r *ACLRule) {
+			r.Protocol = "udp"
+			r.TCPFlag = "syn"
+		}},
+		{"unknown TCP flag", func(r *ACLRule) { r.TCPFlag = "ece" }},
+		{"padded service name", func(r *ACLRule) { r.Service = " custom " }},
+		{"service name without index", func(r *ACLRule) { r.Service = "custom" }},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			rule := testACLRule("invalid", "accept", 5)
 			test.edit(&rule)
-			if _, err := rule.dalPayload(); err == nil {
+			if _, err := rule.dalPayload(0); err == nil {
 				t.Fatal("expected invalid ACL rule to be rejected")
 			}
 		})
@@ -115,6 +205,63 @@ func TestParseACLRuleNormalizesRouterRepresentations(t *testing.T) {
 	}
 }
 
+func TestParseACLRuleMapsFilterFields(t *testing.T) {
+	row := fixtureACLRow("filters", 1, 1)
+	row["Target"] = "Reject"
+	row["IPVersion"] = float64(6)
+	row["SourceIP"], row["SourceMask"] = "2001:db8::", "32"
+	row["DestIP"], row["DestMask"] = "2001:db8:1::", "64"
+	row["MACAddress"] = "aa:bb:cc:dd:ee:ff"
+	row["Direction"] = "LAN_TO_WAN"
+	row["X_ZYXEL_ServiceIndex"] = float64(4)
+	row["ServiceName"] = "custom-https"
+	row["X_ZYXEL_TCPFlagMask"], row["X_ZYXEL_TCPFlagComp"] = "SYN", "SYN"
+	rule, err := parseACLRule(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule.Action != "reject" || rule.IPVersion != "ipv6" || rule.Direction != "lan_to_wan" {
+		t.Fatalf("unexpected action/version/direction: %#v", rule)
+	}
+	if rule.SourceCIDR != "2001:db8::/32" || rule.DestinationCIDR != "2001:db8:1::/64" {
+		t.Fatalf("unexpected IPv6 CIDRs: %#v", rule)
+	}
+	if rule.MACAddress != "AA:BB:CC:DD:EE:FF" || rule.Service != "custom-https" || rule.TCPFlag != "syn" {
+		t.Fatalf("unexpected filters: %#v", rule)
+	}
+}
+
+func TestParseACLRuleRejectsUnsupportedFilterRepresentations(t *testing.T) {
+	cases := []struct {
+		name string
+		edit func(map[string]any)
+		want string
+	}{
+		{"direction", func(row map[string]any) { row["Direction"] = "SIDEWAYS" }, "Direction"},
+		{"MAC address", func(row map[string]any) { row["MACAddress"] = "not-a-mac" }, "MAC"},
+		{"service without name", func(row map[string]any) { row["X_ZYXEL_ServiceIndex"] = float64(4) }, "service"},
+		{"TCP flag mismatch", func(row map[string]any) {
+			row["X_ZYXEL_TCPFlagMask"], row["X_ZYXEL_TCPFlagComp"] = "SYN", "ACK"
+		}, "TCP flag"},
+		{"unknown TCP flag", func(row map[string]any) {
+			row["X_ZYXEL_TCPFlagMask"], row["X_ZYXEL_TCPFlagComp"] = "ECE", "ECE"
+		}, "TCP flag"},
+		{"TCP flag on ICMP", func(row map[string]any) {
+			row["Protocol"], row["DestPort"], row["DestPortRangeMax"] = "ICMP", float64(-1), float64(-1)
+			row["X_ZYXEL_TCPFlagMask"], row["X_ZYXEL_TCPFlagComp"] = "SYN", "SYN"
+		}, "TCP flags"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			row := fixtureACLRow("unsupported", 1, 1)
+			test.edit(row)
+			if _, err := parseACLRule(row); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestParseACLRuleRateLimit(t *testing.T) {
 	row := fixtureACLRow("rate", 1, 1)
 	row["LimitRate"] = float64(120)
@@ -144,19 +291,48 @@ func TestParseACLRuleRateLimit(t *testing.T) {
 	}
 }
 
+func TestParseACLRuleNormalizesProtocols(t *testing.T) {
+	cases := map[string]string{
+		"ALL": "all", "TCPUDP": "tcp_udp", "TCP/UDP": "tcp_udp",
+		"TCP": "tcp", "UDP": "udp", "ICMP": "icmp", "ICMPv6": "icmpv6",
+	}
+	for routerValue, protocol := range cases {
+		t.Run(routerValue, func(t *testing.T) {
+			row := fixtureACLRow("protocol", 1, 1)
+			row["Protocol"] = routerValue
+			if protocol != "tcp" {
+				row["DestPort"], row["DestPortRangeMax"] = float64(-1), float64(-1)
+			}
+			rule, err := parseACLRule(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rule.Protocol != protocol {
+				t.Fatalf("Protocol = %q, want %q", rule.Protocol, protocol)
+			}
+		})
+	}
+}
+
 func TestParseACLRuleRejectsUnsupportedSelectedProfile(t *testing.T) {
 	row := fixtureACLRow("selected", 1, 1)
-	row["Protocol"] = "UDP"
+	row["Protocol"] = "SCTP"
 	if _, err := parseACLRule(row); err == nil || !strings.Contains(err.Error(), "unsupported Protocol") {
 		t.Fatalf("expected unsupported selected profile error, got %v", err)
 	}
 	// Listing and collision checks keep unrelated rules opaque; only a selected
 	// managed row is decoded against the provider's fixed profile.
-	unmanaged := map[string]any{"Name": "unmanaged", "Order": float64(1), "Protocol": "UDP", "Direction": "LAN_TO_WAN", "Interface": "LAN"}
+	unmanaged := map[string]any{"Name": "unmanaged", "Order": float64(1), "Protocol": "SCTP", "Direction": "LAN_TO_WAN", "Interface": "LAN"}
 	rows := []map[string]any{unmanaged, fixtureACLRow("selected", 2, 10)}
 	found, err := findACLRow(rows, "selected")
 	if err != nil || found == nil {
 		t.Fatalf("unrelated unsupported profile should not block name lookup: %v", err)
+	}
+	// Ports are not accepted for protocols that do not use them.
+	row = fixtureACLRow("icmp-with-ports", 2, 2)
+	row["Protocol"] = "ICMP"
+	if _, err := parseACLRule(row); err == nil || !strings.Contains(err.Error(), "destination ports") {
+		t.Fatalf("expected portless protocol port error, got %v", err)
 	}
 }
 
@@ -203,7 +379,7 @@ func TestACLSessionGateHonorsCanceledContext(t *testing.T) {
 	<-client.sessionGate
 }
 func testACLRule(name, action string, order int64) ACLRule {
-	return ACLRule{Name: name, Action: action, Order: order, SourceCIDR: "198.51.100.0/24", DestinationCIDR: "203.0.113.10/32", DestinationPortStart: 443, DestinationPortEnd: 443, Enabled: true}
+	return ACLRule{Name: name, Action: action, Order: order, Protocol: "tcp", SourceCIDR: "198.51.100.0/24", DestinationCIDR: "203.0.113.10/32", DestinationPortStart: int64Pointer(443), DestinationPortEnd: int64Pointer(443), Enabled: true}
 }
 
 func fixtureACLRow(name string, index, order int) map[string]any {

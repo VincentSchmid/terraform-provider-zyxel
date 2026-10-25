@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -12,18 +13,38 @@ import (
 	"strings"
 )
 
-const firewallACLOID = "firewall_acl"
+const (
+	firewallACLOID       = "firewall_acl"
+	firewallProtocolOID  = "firewall_proto"
+	aclIPVersionIPv4     = "ipv4"
+	aclIPVersionIPv6     = "ipv6"
+	aclDirectionWANToLAN = "wan_to_lan"
+)
 
 var ErrACLRuleNotFound = errors.New("ACL rule not found")
 
 type ACLRule struct {
-	Name                 string
-	Action               string
-	Order                int64
-	SourceCIDR           string
-	DestinationCIDR      string
-	DestinationPortStart int64
-	DestinationPortEnd   int64
+	Name            string
+	Action          string
+	Order           int64
+	Protocol        string
+	IPVersion       string
+	Direction       string
+	SourceCIDR      string
+	DestinationCIDR string
+	// MACAddress is the canonical colon-separated MAC filter. Empty means any
+	// source MAC address.
+	MACAddress string
+	// Service is the name of a custom protocol/service group from the router's
+	// firewall_proto table. Empty means no custom service.
+	Service string
+	// TCPFlag is the lowercase TCP flag name (syn, ack, urg, psh, rst, fin) the
+	// rule matches. Empty means any flag. Only valid for tcp and tcp_udp.
+	TCPFlag string
+	// DestinationPortStart and DestinationPortEnd are nil for any destination
+	// port. Ports only apply to the tcp, udp, and tcp_udp protocols.
+	DestinationPortStart *int64
+	DestinationPortEnd   *int64
 	SourcePortStart      *int64
 	SourcePortEnd        *int64
 	Enabled              bool
@@ -64,11 +85,21 @@ func (c *Client) ReadACLRule(ctx context.Context, name string) (ACLRule, error) 
 
 func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutcome, error) {
 	var outcome ACLCreateOutcome
-	payload, err := rule.dalPayload()
-	if err != nil {
+	// Validate the profile before opening a session so invalid direct Go input
+	// never reaches the network. The service index is resolved inside the
+	// session because it requires a router table read.
+	if err := rule.validateForWrite(); err != nil {
 		return outcome, err
 	}
-	err = c.withSession(ctx, func(s *routerSession) error {
+	err := c.withSession(ctx, func(s *routerSession) error {
+		serviceIndex, err := s.resolveServiceIndex(ctx, rule.Service)
+		if err != nil {
+			return err
+		}
+		payload, err := rule.dalPayload(serviceIndex)
+		if err != nil {
+			return err
+		}
 		rows, err := s.readACLRows(ctx)
 		if err != nil {
 			return err
@@ -166,7 +197,11 @@ func (c *Client) DeleteACLRule(ctx context.Context, name string) error {
 }
 
 func (s *routerSession) readACLRows(ctx context.Context) ([]map[string]any, error) {
-	query := url.Values{"oid": {firewallACLOID}, "sessionkey": {s.sessionKey}}
+	return s.readDALObjects(ctx, firewallACLOID)
+}
+
+func (s *routerSession) readDALObjects(ctx context.Context, oid string) ([]map[string]any, error) {
+	query := url.Values{"oid": {oid}, "sessionkey": {s.sessionKey}}
 	response, err := s.get(ctx, "/cgi-bin/DAL?"+query.Encode())
 	if err != nil {
 		return nil, err
@@ -176,24 +211,57 @@ func (s *routerSession) readACLRows(ctx context.Context) ([]map[string]any, erro
 		return nil, err
 	}
 	if value["result"] != "ZCFG_SUCCESS" {
-		return nil, errors.New("router rejected the ACL table read request")
+		return nil, fmt.Errorf("router rejected the %s table read request", oid)
 	}
 	if value["Object"] == nil {
 		return []map[string]any{}, nil
 	}
 	objects, ok := value["Object"].([]any)
 	if !ok {
-		return nil, errors.New("router ACL response did not contain a rule list")
+		return nil, fmt.Errorf("router %s response did not contain a row list", oid)
 	}
 	rows := make([]map[string]any, 0, len(objects))
 	for _, object := range objects {
 		row, ok := object.(map[string]any)
 		if !ok {
-			return nil, errors.New("router returned a malformed ACL row")
+			return nil, fmt.Errorf("router returned a malformed %s row", oid)
 		}
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// resolveServiceIndex maps a custom service name to the display index the ACL
+// write endpoint expects. Firmware converts that index to the stored object
+// index, so sending the stored index from a read would target the wrong row
+// after a deletion shifted the table.
+func (s *routerSession) resolveServiceIndex(ctx context.Context, service string) (int64, error) {
+	if service == "" {
+		return 0, nil
+	}
+	rows, err := s.readDALObjects(ctx, firewallProtocolOID)
+	if err != nil {
+		return 0, fmt.Errorf("reading custom services: %w", err)
+	}
+	var index int64
+	for _, row := range rows {
+		name, ok := aclString(row["Name"])
+		if !ok || name != service {
+			continue
+		}
+		if index != 0 {
+			return 0, fmt.Errorf("router returned multiple custom services named %q", service)
+		}
+		value, ok := aclInt64(row["Index"])
+		if !ok || value < 1 {
+			return 0, fmt.Errorf("router returned an invalid index for custom service %q", service)
+		}
+		index = value
+	}
+	if index == 0 {
+		return 0, fmt.Errorf("custom service %q does not exist on the router", service)
+	}
+	return index, nil
 }
 
 func findACLRow(rows []map[string]any, name string) (*map[string]any, error) {
@@ -213,63 +281,131 @@ func findACLRow(rows []map[string]any, name string) (*map[string]any, error) {
 	return found, nil
 }
 
-func (r ACLRule) dalPayload() (map[string]any, error) {
-	sourceIP, sourceMask, err := splitCanonicalIPv4CIDR(r.SourceCIDR)
+func (r ACLRule) validateForWrite() error {
+	if strings.TrimSpace(r.Name) == "" || r.Order < 1 {
+		return errors.New("ACL name must be non-empty and order must be positive")
+	}
+	if _, err := r.routerTarget(); err != nil {
+		return err
+	}
+	if _, err := routerACLProtocol(r.Protocol); err != nil {
+		return err
+	}
+	if _, err := r.routerIPVersion(); err != nil {
+		return err
+	}
+	if _, err := r.routerDirection(); err != nil {
+		return err
+	}
+	if _, err := aclMACAddress(r.MACAddress); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.Service) != r.Service {
+		return errors.New("ACL service name must not have leading or trailing whitespace")
+	}
+	if _, err := routerACLTCPFlag(r.TCPFlag); err != nil {
+		return err
+	}
+	if r.TCPFlag != "" && !aclProtocolUsesTCPFlags(r.Protocol) {
+		return errors.New("ACL TCP flags are only supported by the tcp and tcp_udp protocols")
+	}
+	version := aclIPVersionNumber(r.IPVersion)
+	if _, _, err := splitCanonicalCIDR(r.SourceCIDR, version); err != nil {
+		return fmt.Errorf("invalid source_cidr: %w", err)
+	}
+	if _, _, err := splitCanonicalCIDR(r.DestinationCIDR, version); err != nil {
+		return fmt.Errorf("invalid destination_cidr: %w", err)
+	}
+	if (r.DestinationPortStart == nil) != (r.DestinationPortEnd == nil) {
+		return errors.New("ACL destination port bounds must both be set or both be null")
+	}
+	if r.DestinationPortStart != nil {
+		if !aclProtocolUsesPorts(r.Protocol) {
+			return errors.New("ACL protocol does not use destination ports")
+		}
+		start, end := *r.DestinationPortStart, *r.DestinationPortEnd
+		if start < 1 || start > 65535 || end < start || end > 65535 {
+			return errors.New("ACL destination port range is invalid")
+		}
+	}
+	if (r.SourcePortStart == nil) != (r.SourcePortEnd == nil) {
+		return errors.New("ACL source port bounds must both be set or both be null")
+	}
+	if r.SourcePortStart != nil {
+		if !aclProtocolUsesPorts(r.Protocol) {
+			return errors.New("ACL protocol does not use source ports")
+		}
+		start, end := *r.SourcePortStart, *r.SourcePortEnd
+		if start < 1 || start > 65535 || end < start || end > 65535 {
+			return errors.New("ACL source port range is invalid")
+		}
+	}
+	if r.RateLimit != nil {
+		if r.Action != "accept" {
+			return errors.New("ACL rate limiting requires the accept action")
+		}
+		if *r.RateLimit < 1 || *r.RateLimit > 512 {
+			return errors.New("ACL rate limit must be between 1 and 512 packets per unit")
+		}
+		unit := r.RateLimitUnit
+		if unit == "" {
+			unit = "minute"
+		}
+		if unit != "minute" && unit != "second" {
+			return errors.New("ACL rate limit unit must be minute or second")
+		}
+	}
+	return nil
+}
+
+// dalPayload builds the router write body. serviceIndex is the display index
+// resolved from the firewall_proto table; it is zero when no service is used.
+func (r ACLRule) dalPayload(serviceIndex int64) (map[string]any, error) {
+	if err := r.validateForWrite(); err != nil {
+		return nil, err
+	}
+	if (r.Service == "") != (serviceIndex == 0) {
+		return nil, errors.New("ACL service name and resolved service index must agree")
+	}
+	version := aclIPVersionNumber(r.IPVersion)
+	sourceIP, sourceMask, err := splitCanonicalCIDR(r.SourceCIDR, version)
 	if err != nil {
 		return nil, fmt.Errorf("invalid source_cidr: %w", err)
 	}
-	destinationIP, destinationMask, err := splitCanonicalIPv4CIDR(r.DestinationCIDR)
+	destinationIP, destinationMask, err := splitCanonicalCIDR(r.DestinationCIDR, version)
 	if err != nil {
 		return nil, fmt.Errorf("invalid destination_cidr: %w", err)
 	}
-	target := ""
-	switch r.Action {
-	case "accept":
-		target = "Accept"
-	case "drop":
-		target = "Drop"
-	default:
-		return nil, errors.New("ACL action must be accept or drop")
-	}
-	if strings.TrimSpace(r.Name) == "" || r.Order < 1 {
-		return nil, errors.New("ACL name must be non-empty and order must be positive")
-	}
-	if r.DestinationPortStart < 1 || r.DestinationPortStart > 65535 || r.DestinationPortEnd < r.DestinationPortStart || r.DestinationPortEnd > 65535 {
-		return nil, errors.New("ACL destination port range is invalid")
+	target, _ := r.routerTarget()
+	protocol, _ := routerACLProtocol(r.Protocol)
+	ipVersion, _ := r.routerIPVersion()
+	direction, _ := r.routerDirection()
+	macAddress, _ := aclMACAddress(r.MACAddress)
+	tcpFlag, _ := routerACLTCPFlag(r.TCPFlag)
+
+	destStart, destEnd := int64(-1), int64(-1)
+	if r.DestinationPortStart != nil {
+		destStart, destEnd = *r.DestinationPortStart, *r.DestinationPortEnd
 	}
 	sourceStart, sourceEnd := int64(-1), int64(-1)
-	if (r.SourcePortStart == nil) != (r.SourcePortEnd == nil) {
-		return nil, errors.New("ACL source port bounds must both be set or both be null")
-	}
 	if r.SourcePortStart != nil {
 		sourceStart, sourceEnd = *r.SourcePortStart, *r.SourcePortEnd
-		if sourceStart < 1 || sourceStart > 65535 || sourceEnd < sourceStart || sourceEnd > 65535 {
-			return nil, errors.New("ACL source port range is invalid")
-		}
 	}
 	rateLimitUnit := r.RateLimitUnit
 	if rateLimitUnit == "" {
 		rateLimitUnit = "minute"
 	}
-	if r.RateLimit != nil {
-		if target != "Accept" {
-			return nil, errors.New("ACL rate limiting requires the accept action")
-		}
-		if *r.RateLimit < 1 || *r.RateLimit > 512 {
-			return nil, errors.New("ACL rate limit must be between 1 and 512 packets per unit")
-		}
-		if rateLimitUnit != "minute" && rateLimitUnit != "second" {
-			return nil, errors.New("ACL rate limit unit must be minute or second")
-		}
-	}
 	payload := map[string]any{
 		"Enable": r.Enabled, "Name": r.Name, "Interface": "ALL", "Order": r.Order,
-		"Target": target, "IPVersion": "IPv4", "SourceIP": sourceIP, "SourceMask": sourceMask,
-		"MACAddress": "AnyMACAddress", "DestIP": destinationIP, "DestMask": destinationMask,
-		"X_ZYXEL_ServiceIndex": 0, "Direction": "WAN_TO_LAN", "X_ZYXEL_ScheduleRule": "",
-		"Protocol": "TCP", "SourcePort": sourceStart, "SourcePortRangeMax": sourceEnd,
-		"DestPort": r.DestinationPortStart, "DestPortRangeMax": r.DestinationPortEnd,
+		"Target": target, "IPVersion": ipVersion, "SourceIP": sourceIP, "SourceMask": sourceMask,
+		"MACAddress": macAddress, "DestIP": destinationIP, "DestMask": destinationMask,
+		"X_ZYXEL_ServiceIndex": serviceIndex, "Direction": direction, "X_ZYXEL_ScheduleRule": "",
+		"Protocol": protocol, "SourcePort": sourceStart, "SourcePortRangeMax": sourceEnd,
+		"DestPort": destStart, "DestPortRangeMax": destEnd,
 		"IPv6header": "", "IPv6headertypes": "",
+	}
+	if tcpFlag != "" {
+		payload["TCPFlag"] = tcpFlag
 	}
 	if r.RateLimit != nil {
 		payload["LimitRate"] = *r.RateLimit
@@ -302,37 +438,76 @@ func parseACLRule(row map[string]any) (ACLRule, error) {
 		rule.Action = "accept"
 	case "drop":
 		rule.Action = "drop"
+	case "reject":
+		rule.Action = "reject"
 	default:
 		return rule, errors.New("ACL row uses an unsupported action")
 	}
-	rule.SourceCIDR, ok = aclCIDR(row["SourceIP"], row["SourceMask"], true)
+	protocol, err := normalizedACLProtocol(row["Protocol"])
+	if err != nil {
+		return rule, err
+	}
+	rule.Protocol = protocol
+	version, ok := aclIPVersion(row["IPVersion"])
+	if !ok || (version != 4 && version != 6) {
+		return rule, errors.New("ACL row uses an unsupported IP version")
+	}
+	rule.IPVersion = aclIPVersionName(version)
+	direction, err := normalizedACLDirection(row["Direction"])
+	if err != nil {
+		return rule, err
+	}
+	rule.Direction = direction
+	macAddress, err := normalizedACLMAC(row["MACAddress"])
+	if err != nil {
+		return rule, err
+	}
+	rule.MACAddress = macAddress
+	rule.SourceCIDR, ok = aclCIDR(row["SourceIP"], row["SourceMask"], version)
 	if !ok {
-		return rule, errors.New("ACL row has an invalid source IPv4 CIDR")
+		return rule, fmt.Errorf("ACL row has an invalid source %s CIDR", rule.IPVersion)
 	}
-	rule.DestinationCIDR, ok = aclCIDR(row["DestIP"], row["DestMask"], false)
+	rule.DestinationCIDR, ok = aclCIDR(row["DestIP"], row["DestMask"], version)
 	if !ok {
-		return rule, errors.New("ACL row has an invalid destination IPv4 CIDR")
+		return rule, fmt.Errorf("ACL row has an invalid destination %s CIDR", rule.IPVersion)
 	}
-	rule.DestinationPortStart, ok = aclInt64(row["DestPort"])
-	if !ok || rule.DestinationPortStart < 1 || rule.DestinationPortStart > 65535 {
-		return rule, errors.New("ACL row has an invalid destination port")
+	rule.TCPFlag, err = normalizedACLTCPFlag(row)
+	if err != nil {
+		return rule, err
 	}
-	rule.DestinationPortEnd, ok = aclInt64(row["DestPortRangeMax"])
-	if !ok || rule.DestinationPortEnd < rule.DestinationPortStart || rule.DestinationPortEnd > 65535 {
-		return rule, errors.New("ACL row has an invalid destination port range")
+	if rule.TCPFlag != "" && !aclProtocolUsesTCPFlags(rule.Protocol) {
+		return rule, errors.New("ACL row uses TCP flags for a protocol that does not support them")
 	}
-	sourceStart, startOK := aclInt64(row["SourcePort"])
-	sourceEnd, endOK := aclInt64(row["SourcePortRangeMax"])
-	if !startOK || !endOK {
-		return rule, errors.New("ACL row has invalid source port bounds")
+	serviceIndex, ok := aclInt64(row["X_ZYXEL_ServiceIndex"])
+	if !ok || serviceIndex < 0 {
+		return rule, errors.New("ACL row has an invalid service index")
 	}
-	if sourceStart == -1 && sourceEnd == -1 {
-		rule.SourcePortStart, rule.SourcePortEnd = nil, nil
-	} else {
-		if sourceStart < 1 || sourceStart > 65535 || sourceEnd < sourceStart || sourceEnd > 65535 {
-			return rule, errors.New("ACL row has an invalid source port range")
+	if serviceIndex != 0 {
+		service, ok := aclString(row["ServiceName"])
+		if !ok || strings.TrimSpace(service) == "" {
+			return rule, errors.New("ACL row references a custom service that is no longer available")
 		}
-		rule.SourcePortStart, rule.SourcePortEnd = &sourceStart, &sourceEnd
+		rule.Service = service
+	}
+	destStart, destEnd, err := aclPortRange(row, "DestPort", "DestPortRangeMax")
+	if err != nil {
+		return rule, fmt.Errorf("ACL row has an invalid destination port range: %w", err)
+	}
+	if destStart != nil {
+		if !aclProtocolUsesPorts(rule.Protocol) {
+			return rule, errors.New("ACL row uses destination ports for a protocol that does not support them")
+		}
+		rule.DestinationPortStart, rule.DestinationPortEnd = destStart, destEnd
+	}
+	sourceStart, sourceEnd, err := aclPortRange(row, "SourcePort", "SourcePortRangeMax")
+	if err != nil {
+		return rule, fmt.Errorf("ACL row has an invalid source port range: %w", err)
+	}
+	if sourceStart != nil {
+		if !aclProtocolUsesPorts(rule.Protocol) {
+			return rule, errors.New("ACL row uses source ports for a protocol that does not support them")
+		}
+		rule.SourcePortStart, rule.SourcePortEnd = sourceStart, sourceEnd
 	}
 	rule.Enabled, ok = aclBool(row["Enable"])
 	if !ok {
@@ -375,25 +550,19 @@ func parseACLRule(row map[string]any) (ACLRule, error) {
 }
 
 func validateACLProfile(row map[string]any) error {
-	profileChecks := []struct {
-		key, want string
-	}{
-		{"Protocol", "TCP"}, {"Direction", "WAN_TO_LAN"},
-		{"MACAddress", "AnyMACAddress"},
-		{"IPv6header", ""}, {"IPv6headertypes", ""},
-	}
-	for _, check := range profileChecks {
-		got, ok := aclString(row[check.key])
-		if !ok || got != check.want {
-			return fmt.Errorf("ACL row uses unsupported %s profile value", check.key)
-		}
-	}
 	// Firmware drops the submitted Interface value from stored rows, so an
 	// absent or empty value means the same "ALL" the create payload sends.
+	// Interface selection is not exposed by this resource.
 	if iface, ok := aclString(row["Interface"]); ok && iface != "" && iface != "ALL" {
 		return errors.New("ACL row uses unsupported Interface profile value")
 	}
-	// "No schedule" is submitted as an empty string and stored as 0.
+	for _, key := range []string{"IPv6header", "IPv6headertypes"} {
+		if value, ok := aclString(row[key]); !ok || value != "" {
+			return fmt.Errorf("ACL row uses unsupported %s profile value", key)
+		}
+	}
+	// "No schedule" is submitted as an empty string and stored as 0. Schedule
+	// rules are intentionally not exposed yet.
 	if schedule, ok := row["X_ZYXEL_ScheduleRule"]; ok {
 		text, textOK := aclString(schedule)
 		number, numberOK := aclInt64(schedule)
@@ -401,15 +570,215 @@ func validateACLProfile(row map[string]any) error {
 			return errors.New("ACL row uses unsupported X_ZYXEL_ScheduleRule profile value")
 		}
 	}
-	serviceIndex, ok := aclInt64(row["X_ZYXEL_ServiceIndex"])
-	if !ok || serviceIndex != 0 {
-		return errors.New("ACL row uses an unsupported service profile")
-	}
-	version, ok := aclIPVersion(row["IPVersion"])
-	if !ok || version != 4 {
-		return errors.New("ACL row uses an unsupported IP version")
-	}
 	return nil
+}
+
+func normalizedACLProtocol(value any) (string, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", errors.New("ACL row has no protocol")
+	}
+	switch strings.ToUpper(strings.TrimSpace(text)) {
+	case "ALL":
+		return "all", nil
+	case "TCP":
+		return "tcp", nil
+	case "UDP":
+		return "udp", nil
+	case "TCPUDP", "TCP/UDP":
+		return "tcp_udp", nil
+	case "ICMP":
+		return "icmp", nil
+	case "ICMPV6":
+		return "icmpv6", nil
+	default:
+		return "", fmt.Errorf("ACL row uses unsupported Protocol value %q", text)
+	}
+}
+
+func routerACLProtocol(protocol string) (string, error) {
+	switch protocol {
+	case "all":
+		return "ALL", nil
+	case "tcp":
+		return "TCP", nil
+	case "udp":
+		return "UDP", nil
+	case "tcp_udp":
+		return "TCPUDP", nil
+	case "icmp":
+		return "ICMP", nil
+	case "icmpv6":
+		return "ICMPv6", nil
+	default:
+		return "", errors.New("ACL protocol must be all, tcp_udp, tcp, udp, icmp, or icmpv6")
+	}
+}
+
+func aclProtocolUsesPorts(protocol string) bool {
+	return protocol == "tcp" || protocol == "udp" || protocol == "tcp_udp"
+}
+
+func aclProtocolUsesTCPFlags(protocol string) bool {
+	return protocol == "tcp" || protocol == "tcp_udp"
+}
+
+func (r ACLRule) routerTarget() (string, error) {
+	switch r.Action {
+	case "accept":
+		return "Accept", nil
+	case "drop":
+		return "Drop", nil
+	case "reject":
+		return "Reject", nil
+	default:
+		return "", errors.New("ACL action must be accept, drop, or reject")
+	}
+}
+
+func normalizedACLDirection(value any) (string, error) {
+	text, ok := aclString(value)
+	if !ok {
+		return "", errors.New("ACL row has no direction")
+	}
+	switch strings.ToUpper(strings.TrimSpace(text)) {
+	case "", "WAN_TO_LAN":
+		return aclDirectionWANToLAN, nil
+	case "LAN_TO_WAN":
+		return "lan_to_wan", nil
+	case "WAN_TO_ROUTER":
+		return "wan_to_router", nil
+	case "LAN_TO_ROUTER":
+		return "lan_to_router", nil
+	default:
+		return "", fmt.Errorf("ACL row uses unsupported Direction value %q", text)
+	}
+}
+
+func (r ACLRule) routerDirection() (string, error) {
+	switch r.Direction {
+	case "", aclDirectionWANToLAN:
+		return "WAN_TO_LAN", nil
+	case "lan_to_wan":
+		return "LAN_TO_WAN", nil
+	case "wan_to_router":
+		return "WAN_TO_ROUTER", nil
+	case "lan_to_router":
+		return "LAN_TO_ROUTER", nil
+	default:
+		return "", errors.New("ACL direction must be wan_to_lan, lan_to_wan, wan_to_router, or lan_to_router")
+	}
+}
+
+func aclIPVersionName(version int64) string {
+	if version == 6 {
+		return aclIPVersionIPv6
+	}
+	return aclIPVersionIPv4
+}
+
+func aclIPVersionNumber(name string) int64 {
+	if name == aclIPVersionIPv6 {
+		return 6
+	}
+	return 4
+}
+
+func (r ACLRule) routerIPVersion() (string, error) {
+	switch r.IPVersion {
+	case "", aclIPVersionIPv4:
+		return "IPv4", nil
+	case aclIPVersionIPv6:
+		return "IPv6", nil
+	default:
+		return "", errors.New("ACL IP version must be ipv4 or ipv6")
+	}
+}
+
+// aclMACAddress validates and canonicalizes a MAC address for the router. The
+// empty string means any source MAC address.
+func aclMACAddress(value string) (string, error) {
+	if value == "" {
+		return "AnyMACAddress", nil
+	}
+	hardware, err := net.ParseMAC(value)
+	if err != nil || len(hardware) != 6 {
+		return "", errors.New("ACL MAC address must be six colon-separated hexadecimal octets")
+	}
+	return strings.ToUpper(hardware.String()), nil
+}
+
+func normalizedACLMAC(value any) (string, error) {
+	text, ok := aclString(value)
+	if !ok {
+		return "", errors.New("ACL row has an invalid MAC address")
+	}
+	text = strings.TrimSpace(text)
+	if text == "" || text == "AnyMACAddress" || strings.EqualFold(text, "any") {
+		return "", nil
+	}
+	hardware, err := net.ParseMAC(text)
+	if err != nil || len(hardware) != 6 {
+		return "", errors.New("ACL row has an invalid MAC address")
+	}
+	return strings.ToUpper(hardware.String()), nil
+}
+
+func routerACLTCPFlag(flag string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(flag)) {
+	case "":
+		return "", nil
+	case "syn":
+		return "SYN", nil
+	case "ack":
+		return "ACK", nil
+	case "urg":
+		return "URG", nil
+	case "psh":
+		return "PSH", nil
+	case "rst":
+		return "RST", nil
+	case "fin":
+		return "FIN", nil
+	default:
+		return "", errors.New("ACL TCP flag must be empty, syn, ack, urg, psh, rst, or fin")
+	}
+}
+
+func normalizedACLTCPFlag(row map[string]any) (string, error) {
+	mask, maskOK := aclString(row["X_ZYXEL_TCPFlagMask"])
+	comparison, comparisonOK := aclString(row["X_ZYXEL_TCPFlagComp"])
+	if (!maskOK && !comparisonOK) || (strings.TrimSpace(mask) == "" && strings.TrimSpace(comparison) == "") {
+		return "", nil
+	}
+	if !maskOK || !comparisonOK || strings.ToUpper(strings.TrimSpace(mask)) != strings.ToUpper(strings.TrimSpace(comparison)) {
+		return "", errors.New("ACL row uses an unsupported TCP flag mask")
+	}
+	flag, err := routerACLTCPFlag(strings.ToLower(strings.TrimSpace(mask)))
+	if err != nil || flag == "" {
+		return "", errors.New("ACL row uses an unsupported TCP flag mask")
+	}
+	return strings.ToLower(flag), nil
+}
+
+func aclPortRange(row map[string]any, startKey, endKey string) (*int64, *int64, error) {
+	startValue, startExists := row[startKey]
+	endValue, endExists := row[endKey]
+	if !startExists && !endExists {
+		return nil, nil, nil
+	}
+	start, startOK := aclInt64(startValue)
+	end, endOK := aclInt64(endValue)
+	if !startOK || !endOK {
+		return nil, nil, errors.New("bounds must be numeric")
+	}
+	if start == -1 && end == -1 {
+		return nil, nil, nil
+	}
+	if start < 1 || start > 65535 || end < start || end > 65535 {
+		return nil, nil, errors.New("bounds must be an ordered range from 1 through 65535, or -1/-1 for any")
+	}
+	return &start, &end, nil
 }
 
 func aclRuleDifferences(want, got ACLRule) []string {
@@ -420,6 +789,38 @@ func aclRuleDifferences(want, got ACLRule) []string {
 	if want.Action != got.Action {
 		differences = append(differences, "action")
 	}
+	if want.Protocol != got.Protocol {
+		differences = append(differences, "protocol")
+	}
+	wantVersion, gotVersion := want.IPVersion, got.IPVersion
+	if wantVersion == "" {
+		wantVersion = aclIPVersionIPv4
+	}
+	if gotVersion == "" {
+		gotVersion = aclIPVersionIPv4
+	}
+	if wantVersion != gotVersion {
+		differences = append(differences, "ip_version")
+	}
+	wantDirection, gotDirection := want.Direction, got.Direction
+	if wantDirection == "" {
+		wantDirection = aclDirectionWANToLAN
+	}
+	if gotDirection == "" {
+		gotDirection = aclDirectionWANToLAN
+	}
+	if wantDirection != gotDirection {
+		differences = append(differences, "direction")
+	}
+	if want.MACAddress != got.MACAddress {
+		differences = append(differences, "mac_address")
+	}
+	if want.Service != got.Service {
+		differences = append(differences, "service")
+	}
+	if want.TCPFlag != got.TCPFlag {
+		differences = append(differences, "tcp_flag")
+	}
 	if want.Order != got.Order {
 		differences = append(differences, "order")
 	}
@@ -429,10 +830,10 @@ func aclRuleDifferences(want, got ACLRule) []string {
 	if want.DestinationCIDR != got.DestinationCIDR {
 		differences = append(differences, "destination_cidr")
 	}
-	if want.DestinationPortStart != got.DestinationPortStart {
+	if !sameInt64Pointer(want.DestinationPortStart, got.DestinationPortStart) {
 		differences = append(differences, "destination_port_start")
 	}
-	if want.DestinationPortEnd != got.DestinationPortEnd {
+	if !sameInt64Pointer(want.DestinationPortEnd, got.DestinationPortEnd) {
 		differences = append(differences, "destination_port_end")
 	}
 	if !sameInt64Pointer(want.SourcePortStart, got.SourcePortStart) {
@@ -467,9 +868,16 @@ func sameInt64Pointer(left, right *int64) bool {
 	return *left == *right
 }
 
-func splitCanonicalIPv4CIDR(value string) (string, string, error) {
+func splitCanonicalCIDR(value string, version int64) (string, string, error) {
 	prefix, err := netip.ParsePrefix(value)
-	if err != nil || !prefix.Addr().Is4() {
+	if err != nil {
+		return "", "", errors.New("must be an IP CIDR")
+	}
+	if version == 6 {
+		if !prefix.Addr().Is6() || prefix.Addr().Is4In6() {
+			return "", "", errors.New("must be an IPv6 CIDR")
+		}
+	} else if !prefix.Addr().Is4() {
 		return "", "", errors.New("must be an IPv4 CIDR")
 	}
 	if prefix != prefix.Masked() {
@@ -478,32 +886,35 @@ func splitCanonicalIPv4CIDR(value string) (string, string, error) {
 	return prefix.Addr().String(), strconv.Itoa(prefix.Bits()), nil
 }
 
-func aclCIDR(ipValue, maskValue any, allowAny bool) (string, bool) {
+func aclCIDR(ipValue, maskValue any, version int64) (string, bool) {
 	ip, ipOK := aclString(ipValue)
 	mask, maskOK := aclStringOrInt(maskValue)
-	if allowAny && (!ipOK || strings.TrimSpace(ip) == "" || ip == "*" || strings.EqualFold(ip, "any")) && (!maskOK || strings.TrimSpace(mask) == "" || strings.TrimSpace(mask) == "0") {
-		return "0.0.0.0/0", true
-	}
-	if allowAny && ipOK && ip == "0.0.0.0" && (!maskOK || strings.TrimSpace(mask) == "" || strings.TrimSpace(mask) == "0") {
+	ip = strings.TrimSpace(ip)
+	mask = strings.TrimSpace(mask)
+	anyAddress := !ipOK || ip == "" || ip == "*" || strings.EqualFold(ip, "any")
+	anyMask := !maskOK || mask == "" || mask == "0"
+	if anyAddress && anyMask {
+		if version == 6 {
+			return "::/0", true
+		}
 		return "0.0.0.0/0", true
 	}
 	if !ipOK || !maskOK {
 		return "", false
 	}
-	ip = strings.TrimSpace(ip)
-	mask = strings.TrimSpace(mask)
-	if allowAny && (ip == "" || ip == "*" || strings.EqualFold(ip, "any")) && (mask == "" || mask == "0") {
-		return "0.0.0.0/0", true
-	}
-	if allowAny && ip == "0.0.0.0" && (mask == "" || mask == "0") {
-		return "0.0.0.0/0", true
-	}
 	addr, err := netip.ParseAddr(ip)
-	if err != nil || !addr.Is4() {
+	if err != nil {
 		return "", false
 	}
 	bits, err := strconv.Atoi(mask)
-	if err != nil || bits < 0 || bits > 32 {
+	if err != nil || bits < 0 {
+		return "", false
+	}
+	if version == 6 {
+		if !addr.Is6() || addr.Is4In6() || bits > 128 {
+			return "", false
+		}
+	} else if !addr.Is4() || bits > 32 {
 		return "", false
 	}
 	return netip.PrefixFrom(addr, bits).Masked().String(), true

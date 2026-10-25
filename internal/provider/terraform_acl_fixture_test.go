@@ -27,6 +27,7 @@ type terraformACLFixture struct {
 	key                 *rsa.PrivateKey
 	sessions            map[string]*terraformACLSession
 	rows                []map[string]any
+	services            []map[string]any
 	sequence            int
 	posts               int
 	deletes             int
@@ -106,11 +107,20 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		delete(f.sessions, cookie.Value)
 		_, _ = io.WriteString(w, `{}`)
 	case "/cgi-bin/DAL":
-		if r.URL.Query().Get("sessionkey") != s.token || r.URL.Query().Get("oid") != "firewall_acl" {
+		oid := r.URL.Query().Get("oid")
+		if r.URL.Query().Get("sessionkey") != s.token || (oid != "firewall_acl" && oid != "firewall_proto") {
 			http.Error(w, "stale token or OID", http.StatusForbidden)
 			return
 		}
 		if r.Method == http.MethodGet {
+			if oid == "firewall_proto" {
+				services := make([]map[string]any, len(f.services))
+				for i, service := range f.services {
+					services[i] = map[string]any{"Index": i + 1, "Iid": service["Iid"], "Name": service["Name"]}
+				}
+				f.reply(w, s, map[string]any{"result": "ZCFG_SUCCESS", "Object": services})
+				return
+			}
 			if f.brokenReads || f.failNextRead {
 				f.failNextRead = false
 				http.Error(w, "fixture read failure", http.StatusServiceUnavailable)
@@ -123,8 +133,22 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 					rows[i][k] = v
 				}
 				rows[i]["Index"] = i + 1
+				if mac, _ := rows[i]["MACAddress"].(string); mac == "" {
+					rows[i]["MACAddress"] = "AnyMACAddress"
+				}
+				if index := fixtureInt(rows[i]["X_ZYXEL_ServiceIndex"]); index != 0 {
+					for _, service := range f.services {
+						if fixtureInt(service["Iid"]) == index {
+							rows[i]["ServiceName"] = service["Name"]
+						}
+					}
+				}
 			}
 			f.reply(w, s, map[string]any{"result": "ZCFG_SUCCESS", "Object": rows})
+			return
+		}
+		if oid != "firewall_acl" {
+			http.Error(w, "unsupported OID write", http.StatusMethodNotAllowed)
 			return
 		}
 		if r.Header.Get("CSRFToken") != s.token || r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.Header.Get("If-Modified-Since") == "" {
@@ -144,7 +168,31 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 		switch r.Method {
 		case http.MethodPost:
-			body["IPVersion"] = 4 // Typical firmware read normalization.
+			// Typical firmware read normalization: the write accepts display
+			// values while the stored row uses router-native values.
+			switch body["IPVersion"] {
+			case "IPv4":
+				body["IPVersion"] = 4
+			case "IPv6":
+				body["IPVersion"] = 6
+			}
+			if body["Protocol"] == "TCPUDP" {
+				body["Protocol"] = "TCP/UDP"
+			}
+			if flag, ok := body["TCPFlag"]; ok {
+				body["X_ZYXEL_TCPFlagMask"], body["X_ZYXEL_TCPFlagComp"] = flag, flag
+				delete(body, "TCPFlag")
+			}
+			if body["MACAddress"] == "AnyMACAddress" {
+				body["MACAddress"] = ""
+			}
+			if ordinal := fixtureInt(body["X_ZYXEL_ServiceIndex"]); ordinal != 0 {
+				if ordinal < 1 || ordinal > len(f.services) {
+					http.Error(w, "unknown service index", http.StatusBadRequest)
+					return
+				}
+				body["X_ZYXEL_ServiceIndex"] = f.services[ordinal-1]["Iid"]
+			}
 			if f.forceOrder {
 				body["Order"] = 99
 			}
@@ -210,6 +258,26 @@ func fixtureDecrypt(key []byte, encodedIV, encodedContent string) ([]byte, error
 		return nil, fmt.Errorf("invalid padding")
 	}
 	return content[:len(content)-padding], nil
+}
+
+// addService registers a custom service group. iid is the stored object index
+// the router keeps in ACL rows; the display index is the list position.
+func (f *terraformACLFixture) addService(name string, iid int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.services = append(f.services, map[string]any{"Name": name, "Iid": iid})
+}
+
+func fixtureInt(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }
 
 func (f *terraformACLFixture) remove(name string) {
