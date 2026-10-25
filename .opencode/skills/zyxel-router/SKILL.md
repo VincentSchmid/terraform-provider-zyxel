@@ -9,21 +9,8 @@ Use these references for questions about supported Zyxel router series and the
 permissions needed by this provider. Fetch the relevant source before answering;
 do not treat this note as an API specification.
 
-## Git Author Convention
-
-For commits made by OpenCode in this repository, use author name `OpenCode` and
-email `opencode.<current-model-name>@vincentschmid.xyz`. Substitute the active
-model's name rather than reusing a previous model's identity. For example, with
-GPT-6.1 Sol, use `opencode.gpt-6.1-sol@vincentschmid.xyz`.
-Apply the identity only to this repository or the individual commit, not global
-Git configuration. This convention does not authorize commits or pushes unless
-the user requests them.
-
 ## Documentation Scope and Privacy
 
-- This is a public provider repository. Keep deployment-specific router models,
-  installed firmware versions, ISP details, addresses, account names and logging
-  state in the deployment's private infrastructure repository, not this skill.
 - Model names in documentation titles describe the manuals' coverage, not a
   user's installed hardware. Match documentation to the target model and
   firmware before claiming compatibility.
@@ -50,22 +37,6 @@ the user requests them.
    Documents Syslog Logging, Local File versus Remote mode, and the Active Log
    categories for System Log and Security Log. Verify labels on the target
    firmware; this reference does not establish that logging is enabled.
-
-## Account Permissions
-
-- Group and Remote Privilege are separate controls. Group selects Administrator
-  or User privileges; Remote Privilege selects the permitted management access
-  side: LAN, WAN, or LAN/WAN.
-- The official series help grants Administrator accounts all Web Configurator
-  menus, including Home Networking, NAT, and Firewall. User accounts have
-  Monitor and Maintenance menus, not those configuration areas.
-- The documented account screen does not offer custom per-feature permissions
-  or an API-only role. Do not claim that no firmware-specific alternative can
-  exist; none was established by these references.
-- Recommend a separate account, such as `terraform`, in the Administrator group
-  with LAN-only access when Terraform connects from the LAN. The username does
-  not need to be `admin`. Do not enable WAN management just to use the provider.
-- This provider uses the web-interface API; SSH and Telnet are unnecessary.
 
 ## Provider Cross-Checks
 
