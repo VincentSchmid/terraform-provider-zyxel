@@ -133,7 +133,7 @@ func unknownSettings(config providerModel) []string {
 }
 
 func (p *ZyxelProvider) Resources(context.Context) []func() resource.Resource {
-	return []func() resource.Resource{NewDHCPReservationResource, NewNATRuleResource, NewACLRuleResource}
+	return []func() resource.Resource{NewDHCPReservationResource, NewNATRuleResource, NewACLRuleResource, NewFirewallResource}
 }
 func (p *ZyxelProvider) DataSources(context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{NewStatusDataSource, NewCloudflareIPv4RangesDataSource}
