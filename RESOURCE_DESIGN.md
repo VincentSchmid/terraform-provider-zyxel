@@ -5,6 +5,33 @@ Status: **partially implemented**. Provider configuration, `zyxel_status`,
 proposals remain a discussion draft; their HCL examples do not run against
 the current provider.
 
+## Implemented general firewall increment
+
+`zyxel_firewall` manages router-wide Firewall General and DoS settings with
+required `ipv4_enabled`, `ipv6_enabled`, `security_level` (`low`, `medium`,
+`high`), and `dos_protection_enabled`, plus computed singleton `id = "router"`.
+Create adopts and configures the built-in settings; Update changes them in
+place; Read detects drift; import uses `router`. Delete stops management
+without changing the router. Only one instance may manage a router, including
+across Terraform states. ACL entries remain separate resources.
+
+Protocol evidence: the `General` and `Dos` components in the extracted
+[Zyxel web UI](https://github.com/dennis-pellanda/Antigravity-REA/blob/5b3f570e3cbb5474892a72198c83a10ed6f8d08e/work/extracted_rootfs/web/static/js/app.js)
+use `GET /cgi-bin/DAL?oid=firewall` and separate PUT payloads for General
+(`IPv4_Enable`, `IPv6_Enable`, `Level_GUI`, `Firewall_Enable`) and DoS
+(`enableDos`). The master `Firewall_Enable` is derived as IPv4 OR IPv6.
+The UI labels Low/Medium/High map to DAL `Off`/`Low`/`High`, respectively;
+Terraform exposes the UI labels in lowercase. No raw DAL configuration is
+exposed or stored in state.
+
+The provider uses encrypted transport, serialized sessions, session-key
+rotation, and readback verification. General and DoS updates are separate
+requests, not an atomic transaction. Unconfirmed or partially applied writes
+preserve singleton identity for refresh/recovery. Missing or malformed settings
+are errors, never assumed disabled. Local encrypted mocks cover the contract;
+target-firmware and hardware writes remain unverified. No live mutation is
+performed.
+
 ## Implemented DHCP increment
 
 The user's request to implement DHCP reservations approves this narrow first
