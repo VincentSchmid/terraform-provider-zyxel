@@ -5,7 +5,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 > **Status: experimental.** Read paths and the mock-router lifecycle tests pass,
 > and a read-only `terraform plan` has been verified against a physical router.
-> **Live writes (NAT, DHCP, firewall ACL, general firewall settings) have not been verified on hardware.**
+> **Live writes (NAT, DHCP, firewall ACL, services, general firewall settings) have not been verified on hardware.**
 > Review every plan before applying, and keep a router configuration backup.
 
 ## Requirements
@@ -96,6 +96,7 @@ several Terraform processes against the router at the same time.
 | `zyxel_dhcp_reservation` | resource | Enabled static DHCP reservation by MAC address |
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
 | `zyxel_acl_rule` | resource | Firewall ACL entry with IPv4/IPv6, protocol, MAC, service, TCP flag, direction, and rate-limit filters |
+| `zyxel_service` | resource | Reusable firewall protocol/service object referenced by ACL ID |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
 
 Full documentation is on the
@@ -147,11 +148,54 @@ resource "zyxel_acl_rule" "cloudflare" {
 }
 ```
 
+## Reusable firewall services and compact ports
+
+```hcl
+resource "zyxel_service" "https" {
+  name              = "HTTPS"
+  protocol          = "tcp"
+  source_ports      = "*"
+  destination_ports = "443"
+}
+
+resource "zyxel_acl_rule" "https" {
+  name             = "Allow-HTTPS"
+  action           = "accept"
+  order            = 10
+  destination_cidr = "192.0.2.10/32"
+  service_id       = zyxel_service.https.id
+}
+```
+
+Both resources accept `source_ports` and `destination_ports` as `"*"` (any),
+`"443"` (single), or `"443-445"` (inclusive range). Ports apply only to TCP/UDP
+(`tcp_udp` is also supported inline in ACLs). ACL numeric bounds remain supported;
+do not combine compact and numeric syntax for the same side. With `service_id`,
+omit inline protocol, ports, TCP flags, and the legacy `service` name field.
+Existing ACL configurations using `service` by name remain supported.
+
+Services support `tcp`, `udp`, `icmp` with `icmp_type`, `icmpv6` with
+`icmpv6_type`, and `other` with required `protocol_number`. Type fields are
+numeric; omitted ICMP types mean any. See the resource docs for bounds.
+
+Service `id` is the native router `Iid`, not the shifting display index. CRUD
+and import use the exact service name. The API resolves the current display
+index before ACL creation or service deletion. Import with
+`terraform import zyxel_service.https HTTPS`.
+
+**Deletion safety:** the router can remove associated ACL rules when deleting a
+service. The provider refuses service deletion while any ACL still references
+it, including unmanaged rules. Terraform references order initial creation and
+final destruction, but replacing an in-use service may require two applies:
+remove dependent ACL resources first, then replace the service and restore the
+ACL resources. Do not use `create_before_destroy` with the same service name.
+Service writes are covered by encrypted mocks, not verified hardware writes.
+
 ## Behavior of managed table entries
 
-The following behavior applies to DHCP reservations, NAT rules, and ACL rules.
+The following behavior applies to DHCP reservations, NAT rules, services, and ACL rules.
 
-- **Names are identities.** `zyxel_nat_rule` and `zyxel_acl_rule` use the router
+- **Names are identities.** `zyxel_nat_rule`, `zyxel_service`, and `zyxel_acl_rule` use the router
   entry name as identity and import key; `zyxel_dhcp_reservation` uses the MAC
   address. Existing entries must be imported explicitly. Create never adopts an
   existing entry, and duplicate matches are errors rather than guesses.

@@ -38,6 +38,12 @@ type ACLRule struct {
 	// Service is the name of a custom protocol/service group from the router's
 	// firewall_proto table. Empty means no custom service.
 	Service string
+	// ServiceID is the native firewall_proto Iid, resolved to a current display
+	// index before writing. It is mutually exclusive with Service and inline filters.
+	ServiceID string
+	// SourcePorts and DestinationPorts accept *, a port, or start-end. Do not
+	// combine them with the corresponding legacy numeric bounds.
+	SourcePorts, DestinationPorts string
 	// TCPFlag is the lowercase TCP flag name (syn, ack, urg, psh, rst, fin) the
 	// rule matches. Empty means any flag. Only valid for tcp and tcp_udp.
 	TCPFlag string
@@ -85,6 +91,9 @@ func (c *Client) ReadACLRule(ctx context.Context, name string) (ACLRule, error) 
 
 func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutcome, error) {
 	var outcome ACLCreateOutcome
+	if err := rule.expandPorts(); err != nil {
+		return outcome, err
+	}
 	// Validate the profile before opening a session so invalid direct Go input
 	// never reaches the network. The service index is resolved inside the
 	// session because it requires a router table read.
@@ -92,7 +101,7 @@ func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutc
 		return outcome, err
 	}
 	err := c.withSession(ctx, func(s *routerSession) error {
-		serviceIndex, err := s.resolveServiceIndex(ctx, rule.Service)
+		serviceIndex, err := s.resolveACLServiceIndex(ctx, rule.Service, rule.ServiceID)
 		if err != nil {
 			return err
 		}
@@ -231,12 +240,12 @@ func (s *routerSession) readDALObjects(ctx context.Context, oid string) ([]map[s
 	return rows, nil
 }
 
-// resolveServiceIndex maps a custom service name to the display index the ACL
+// resolveACLServiceIndex maps a service name or native ID to the display index the ACL
 // write endpoint expects. Firmware converts that index to the stored object
 // index, so sending the stored index from a read would target the wrong row
 // after a deletion shifted the table.
-func (s *routerSession) resolveServiceIndex(ctx context.Context, service string) (int64, error) {
-	if service == "" {
+func (s *routerSession) resolveACLServiceIndex(ctx context.Context, service, id string) (int64, error) {
+	if service == "" && id == "" {
 		return 0, nil
 	}
 	rows, err := s.readDALObjects(ctx, firewallProtocolOID)
@@ -246,7 +255,8 @@ func (s *routerSession) resolveServiceIndex(ctx context.Context, service string)
 	var index int64
 	for _, row := range rows {
 		name, ok := aclString(row["Name"])
-		if !ok || name != service {
+		iid, _ := aclString(row["Iid"])
+		if (id != "" && iid != id) || (id == "" && (!ok || name != service)) {
 			continue
 		}
 		if index != 0 {
@@ -281,7 +291,51 @@ func findACLRow(rows []map[string]any, name string) (*map[string]any, error) {
 	return found, nil
 }
 
+func (r *ACLRule) expandPorts() error {
+	for _, pair := range []struct {
+		value      *string
+		start, end **int64
+	}{
+		{&r.SourcePorts, &r.SourcePortStart, &r.SourcePortEnd},
+		{&r.DestinationPorts, &r.DestinationPortStart, &r.DestinationPortEnd},
+	} {
+		if *pair.value == "" {
+			continue
+		}
+		if *pair.start != nil || *pair.end != nil {
+			return errors.New("compact ports conflict with numeric port bounds")
+		}
+		if !aclProtocolUsesPorts(r.Protocol) {
+			return errors.New("compact ports require tcp, udp, or tcp_udp")
+		}
+		if r.ServiceID != "" {
+			return errors.New("service_id conflicts with inline ports")
+		}
+		start, end, err := ParsePorts(*pair.value)
+		if err != nil {
+			return err
+		}
+		*pair.start, *pair.end, *pair.value = start, end, ""
+	}
+	return nil
+}
+
 func (r ACLRule) validateForWrite() error {
+	if err := r.expandPorts(); err != nil {
+		return err
+	}
+	if r.ServiceID != "" {
+		id, err := strconv.ParseInt(r.ServiceID, 10, 64)
+		if err != nil || id < 1 || strconv.FormatInt(id, 10) != r.ServiceID {
+			return errors.New("service_id must be a positive native service ID")
+		}
+		if r.Service != "" || r.SourcePortStart != nil || r.DestinationPortStart != nil || r.SourcePorts != "" || r.DestinationPorts != "" || r.TCPFlag != "" {
+			return errors.New("service_id conflicts with service and inline port/TCP flag filters")
+		}
+		if r.Protocol != "all" {
+			return errors.New("service_id requires the neutral all protocol; the referenced service selects the protocol")
+		}
+	}
 	if strings.TrimSpace(r.Name) == "" || r.Order < 1 {
 		return errors.New("ACL name must be non-empty and order must be positive")
 	}
@@ -361,10 +415,13 @@ func (r ACLRule) validateForWrite() error {
 // dalPayload builds the router write body. serviceIndex is the display index
 // resolved from the firewall_proto table; it is zero when no service is used.
 func (r ACLRule) dalPayload(serviceIndex int64) (map[string]any, error) {
+	if err := r.expandPorts(); err != nil {
+		return nil, err
+	}
 	if err := r.validateForWrite(); err != nil {
 		return nil, err
 	}
-	if (r.Service == "") != (serviceIndex == 0) {
+	if (r.Service == "" && r.ServiceID == "") != (serviceIndex == 0) {
 		return nil, errors.New("ACL service name and resolved service index must agree")
 	}
 	version := aclIPVersionNumber(r.IPVersion)
@@ -483,6 +540,7 @@ func parseACLRule(row map[string]any) (ACLRule, error) {
 		return rule, errors.New("ACL row has an invalid service index")
 	}
 	if serviceIndex != 0 {
+		rule.ServiceID = strconv.FormatInt(serviceIndex, 10)
 		service, ok := aclString(row["ServiceName"])
 		if !ok || strings.TrimSpace(service) == "" {
 			return rule, errors.New("ACL row references a custom service that is no longer available")
@@ -775,6 +833,9 @@ func aclPortRange(row map[string]any, startKey, endKey string) (*int64, *int64, 
 	if start == -1 && end == -1 {
 		return nil, nil, nil
 	}
+	if start >= 1 && start <= 65535 && end == -1 {
+		end = start
+	}
 	if start < 1 || start > 65535 || end < start || end > 65535 {
 		return nil, nil, errors.New("bounds must be an ordered range from 1 through 65535, or -1/-1 for any")
 	}
@@ -815,7 +876,10 @@ func aclRuleDifferences(want, got ACLRule) []string {
 	if want.MACAddress != got.MACAddress {
 		differences = append(differences, "mac_address")
 	}
-	if want.Service != got.Service {
+	if want.ServiceID != "" && want.ServiceID != got.ServiceID {
+		differences = append(differences, "service_id")
+	}
+	if want.ServiceID == "" && want.Service != got.Service {
 		differences = append(differences, "service")
 	}
 	if want.TCPFlag != got.TCPFlag {
