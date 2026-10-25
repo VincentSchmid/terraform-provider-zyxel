@@ -6,4 +6,6 @@ resource "zyxel_acl_rule" "https" {
   destination_cidr       = "192.0.2.10/32"
   destination_port_start = 443
   destination_port_end   = 443
+  rate_limit             = 100
+  rate_limit_unit        = "minute"
 }

@@ -35,6 +35,18 @@ func TestACLRulePayloadUsesScriptProfile(t *testing.T) {
 	if payload["Target"] != "Drop" || payload["SourcePort"] != int64(1024) || payload["SourcePortRangeMax"] != int64(2048) {
 		t.Fatalf("unexpected drop/source-port payload: %#v", payload)
 	}
+	if _, exists := payload["LimitRate"]; exists {
+		t.Fatalf("disabled rate limiting should omit LimitRate: %#v", payload)
+	}
+	rule.Action = "accept"
+	rule.RateLimit, rule.RateLimitUnit = int64Pointer(100), "second"
+	payload, err = rule.dalPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["LimitRate"] != int64(100) || payload["LimitRateUnit"] != "second" {
+		t.Fatalf("unexpected rate limit payload: %#v", payload)
+	}
 }
 
 func TestACLRulePayloadRejectsInvalidCIDRsAndRanges(t *testing.T) {
@@ -48,6 +60,10 @@ func TestACLRulePayloadRejectsInvalidCIDRsAndRanges(t *testing.T) {
 		{"out of range destination port", func(r *ACLRule) { r.DestinationPortEnd = 65536 }},
 		{"partial source port pair", func(r *ACLRule) { r.SourcePortStart = int64Pointer(1024) }},
 		{"reversed source ports", func(r *ACLRule) { r.SourcePortStart, r.SourcePortEnd = int64Pointer(2048), int64Pointer(1024) }},
+		{"zero rate limit", func(r *ACLRule) { r.RateLimit = int64Pointer(0) }},
+		{"rate limit above maximum", func(r *ACLRule) { r.RateLimit = int64Pointer(513) }},
+		{"invalid rate limit unit", func(r *ACLRule) { r.RateLimit, r.RateLimitUnit = int64Pointer(100), "hour" }},
+		{"rate limit on drop action", func(r *ACLRule) { r.Action, r.RateLimit = "drop", int64Pointer(100) }},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -96,6 +112,35 @@ func TestParseACLRuleNormalizesRouterRepresentations(t *testing.T) {
 	rule, err := parseACLRule(row)
 	if err != nil || rule.SourceCIDR != "0.0.0.0/0" {
 		t.Fatalf("expected empty source to normalize to any, got %#v, %v", rule, err)
+	}
+}
+
+func TestParseACLRuleRateLimit(t *testing.T) {
+	row := fixtureACLRow("rate", 1, 1)
+	row["LimitRate"] = float64(120)
+	row["LimitRateUnit"] = "Second"
+	rule, err := parseACLRule(row)
+	if err != nil || rule.RateLimit == nil || *rule.RateLimit != 120 || rule.RateLimitUnit != "second" {
+		t.Fatalf("parse rate limit = %#v, %v", rule, err)
+	}
+
+	row = fixtureACLRow("disabled-rate", 1, 1)
+	row["LimitRate"] = float64(0)
+	row["LimitRateUnit"] = "second"
+	rule, err = parseACLRule(row)
+	if err != nil || rule.RateLimit != nil || rule.RateLimitUnit != "minute" {
+		t.Fatalf("disabled rate limit should normalize to minute/nil: %#v, %v", rule, err)
+	}
+
+	row["LimitRate"] = float64(513)
+	if _, err := parseACLRule(row); err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Fatalf("expected invalid rate limit error, got %v", err)
+	}
+	row = fixtureACLRow("invalid-unit", 1, 1)
+	row["LimitRate"] = float64(100)
+	row["LimitRateUnit"] = "hour"
+	if _, err := parseACLRule(row); err == nil || !strings.Contains(err.Error(), "rate limit unit") {
+		t.Fatalf("expected invalid rate limit unit error, got %v", err)
 	}
 }
 

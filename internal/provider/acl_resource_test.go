@@ -17,9 +17,10 @@ func TestACLCreateRejectsUnknownPlannedInputsBeforeRouterAccess(t *testing.T) {
 		SourceCIDR: types.StringValue("0.0.0.0/0"), DestinationCIDR: types.StringValue("203.0.113.10/32"),
 		DestinationPortStart: types.Int64Value(443), DestinationPortEnd: types.Int64Value(443),
 		SourcePortStart: types.Int64Unknown(), SourcePortEnd: types.Int64Null(), Enabled: types.BoolValue(true),
+		RateLimit: types.Int64Unknown(), RateLimitUnit: types.StringValue("minute"),
 	}
 	unknown := unknownACLPlanAttributes(model)
-	for _, name := range []string{"order", "source_port_start"} {
+	for _, name := range []string{"order", "source_port_start", "rate_limit"} {
 		found := false
 		for _, item := range unknown {
 			if item == name {
