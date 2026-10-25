@@ -2,13 +2,11 @@ package provider
 
 import (
 	"context"
-	"fmt"
-	"net"
-	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -78,7 +76,7 @@ func (p *ZyxelProvider) Configure(ctx context.Context, req provider.ConfigureReq
 		return
 	}
 
-	endpoint, err := normalizeHost(host)
+	endpoint, err := zyxel.NormalizeEndpoint(host)
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("host"), "Invalid router host", err.Error())
 		return
@@ -92,7 +90,7 @@ func (p *ZyxelProvider) Configure(ctx context.Context, req provider.ConfigureReq
 		return
 	}
 
-	client, err := NewClient(endpoint, Credentials{Username: username, Password: password}, time.Duration(timeout)*time.Second)
+	client, err := zyxel.NewClient(endpoint, zyxel.Credentials{Username: username, Password: password}, time.Duration(timeout)*time.Second)
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to configure Zyxel client", "The HTTP client could not be initialized.")
 		return
@@ -162,31 +160,4 @@ func resolveCredentials(username, password types.String) (string, string) {
 		return "", password.ValueString()
 	}
 	return envUsername, envPassword
-}
-
-func normalizeHost(host string) (string, error) {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return "", fmt.Errorf("host cannot be empty")
-	}
-	if !strings.Contains(host, "://") {
-		host = "http://" + host
-	}
-	parsed, err := url.Parse(host)
-	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || strings.ContainsAny(parsed.Host, " \t\r\n") {
-		return "", fmt.Errorf("host must be a hostname, IP address, or an HTTP(S) origin without credentials, a non-root path, query, or fragment")
-	}
-	if port := parsed.Port(); port != "" {
-		portNumber, err := strconv.Atoi(port)
-		if err != nil || portNumber < 1 || portNumber > 65535 {
-			return "", fmt.Errorf("host contains an invalid port")
-		}
-	}
-	if strings.HasSuffix(parsed.Host, ":") || strings.Contains(parsed.Host, "%") {
-		return "", fmt.Errorf("host contains an invalid hostname or port")
-	}
-	if net.ParseIP(parsed.Hostname()) == nil && strings.Contains(parsed.Hostname(), "_") {
-		return "", fmt.Errorf("host contains an invalid hostname")
-	}
-	return strings.TrimRight(parsed.String(), "/"), nil
 }

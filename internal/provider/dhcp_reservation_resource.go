@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -28,7 +30,7 @@ var (
 
 func NewDHCPReservationResource() resource.Resource { return &DHCPReservationResource{} }
 
-type DHCPReservationResource struct{ client *Client }
+type DHCPReservationResource struct{ client *zyxel.Client }
 
 type dhcpReservationModel struct {
 	MACAddress types.String `tfsdk:"mac_address"`
@@ -80,9 +82,9 @@ func (r *DHCPReservationResource) Configure(_ context.Context, req resource.Conf
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := req.ProviderData.(*zyxel.Client)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *Client, got %T.", req.ProviderData))
+		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *zyxel.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -122,7 +124,7 @@ func (r *DHCPReservationResource) Create(ctx context.Context, req resource.Creat
 	}
 	if err != nil {
 		detail := fmt.Sprintf("creating DHCP reservation (%s): %s", plan.MACAddress.ValueString(), err)
-		var ambiguous *ambiguousWriteError
+		var ambiguous *zyxel.AmbiguousWriteError
 		if errors.As(err, &ambiguous) && created {
 			detail += " The router may have applied the write; refresh the reservation or import its MAC address to recover state."
 		}
@@ -142,14 +144,9 @@ func (r *DHCPReservationResource) Read(ctx context.Context, req resource.ReadReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	rows, err := r.client.DHCPReservations(ctx)
+	found, err := r.client.ReadDHCPReservation(ctx, state.MACAddress.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading DHCP reservation", fmt.Sprintf("reading DHCP reservation (%s): %s", state.MACAddress.ValueString(), err))
-		return
-	}
-	found, err := findDHCPReservation(rows, state.MACAddress.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Ambiguous DHCP reservation", err.Error())
 		return
 	}
 	if found == nil {
@@ -182,22 +179,12 @@ func (r *DHCPReservationResource) Delete(ctx context.Context, req resource.Delet
 }
 
 func (r *DHCPReservationResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	mac, err := normalizeImportMAC(req.ID)
+	mac, err := zyxel.NormalizeMAC(req.ID)
 	if err != nil {
 		resp.Diagnostics.AddAttributeError(path.Root("mac_address"), "Invalid DHCP reservation import ID", "Import ID must be a MAC address in colon or hyphen notation.")
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("mac_address"), mac)...)
-}
-
-func normalizeImportMAC(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	value = strings.ReplaceAll(value, "-", ":")
-	value = strings.ToUpper(value)
-	if !regexp.MustCompile(`^[0-9A-F]{2}(:[0-9A-F]{2}){5}$`).MatchString(value) {
-		return "", fmt.Errorf("invalid MAC")
-	}
-	return value, nil
 }
 
 type ipv4Validator struct{}

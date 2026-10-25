@@ -1,4 +1,4 @@
-package provider
+package zyxel
 
 import (
 	"bytes"
@@ -14,16 +14,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const maxResponseBytes = 4 << 20
 
+// Credentials contains router login credentials and redacts formatted output.
 type Credentials struct {
 	Username string
 	Password string
@@ -32,6 +34,8 @@ type Credentials struct {
 func (Credentials) String() string   { return "Credentials{Username:[REDACTED], Password:[REDACTED]}" }
 func (Credentials) GoString() string { return "Credentials{Username:[REDACTED], Password:[REDACTED]}" }
 
+// Client serializes authenticated router operations. Construct it with NewClient;
+// its zero value is not usable. Separate clients do not share a session lock.
 type Client struct {
 	endpoint    string
 	credentials Credentials
@@ -39,7 +43,16 @@ type Client struct {
 	sessionGate chan struct{}
 }
 
+// NewClient configures a client without contacting the router. Each operation
+// authenticates its own serialized session and performs best-effort logout.
 func NewClient(endpoint string, credentials Credentials, timeout time.Duration) (*Client, error) {
+	endpoint, err := NormalizeEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	if timeout <= 0 {
+		return nil, errors.New("timeout must be positive")
+	}
 	return &Client{
 		endpoint: strings.TrimRight(endpoint, "/"), credentials: credentials,
 		httpClient:  &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -58,33 +71,6 @@ type routerSession struct {
 	httpClient *http.Client
 	key        []byte
 	sessionKey string
-}
-
-func (c *Client) ReadStatus(ctx context.Context) (map[string]any, error) {
-	var status map[string]any
-	err := c.withSession(ctx, func(s *routerSession) error {
-		response, err := s.get(ctx, "/cgi-bin/DAL?oid=status&sessionkey="+url.QueryEscape(s.sessionKey))
-		if err != nil {
-			return err
-		}
-		value, err := s.decryptResponse(response)
-		if err != nil {
-			return err
-		}
-		if result, ok := value["result"].(string); ok && result != "ZCFG_SUCCESS" {
-			return errors.New("router rejected the status request")
-		}
-		objects, ok := value["Object"].([]any)
-		if !ok || len(objects) == 0 {
-			return errors.New("router status response did not contain a status object")
-		}
-		status, ok = objects[0].(map[string]any)
-		if !ok || len(status) == 0 {
-			return errors.New("router status response contained an empty status object")
-		}
-		return nil
-	})
-	return status, err
 }
 
 // withSession serializes a router session across login, DAL operations, and logout.
@@ -107,187 +93,6 @@ func (c *Client) withSession(ctx context.Context, fn func(*routerSession) error)
 	}
 	defer s.logout()
 	return fn(s)
-}
-
-type DHCPReservation struct {
-	Index   int64
-	MACAddr string
-	IPAddr  string
-	Enabled bool
-}
-
-func (c *Client) DHCPReservations(ctx context.Context) ([]DHCPReservation, error) {
-	var reservations []DHCPReservation
-	err := c.withSession(ctx, func(s *routerSession) error {
-		var err error
-		reservations, err = s.readDHCPReservations(ctx)
-		return err
-	})
-	return reservations, err
-}
-
-func (c *Client) CreateDHCPReservation(ctx context.Context, mac, ip string, enabled bool) (bool, error) {
-	if !enabled {
-		return false, errors.New("DHCP reservations can only be created enabled")
-	}
-	created := false
-	err := c.withSession(ctx, func(s *routerSession) error {
-		rows, err := s.readDHCPReservations(ctx)
-		if err != nil {
-			return err
-		}
-		for _, row := range rows {
-			if sameDHCPMAC(row.MACAddr, mac) {
-				return errors.New("a DHCP reservation for this MAC already exists; import it before managing it")
-			}
-		}
-		result, err := s.writeDAL(ctx, http.MethodPost, "static_dhcp", "", map[string]any{
-			"Enable": enabled, "MACAddr": mac, "IPAddr": ip, "BrWan": "Default",
-		})
-		if err != nil {
-			var ambiguous *ambiguousWriteError
-			if errors.As(err, &ambiguous) {
-				created = true
-			}
-			return err
-		}
-		if result["result"] != "ZCFG_SUCCESS" {
-			return errors.New("router rejected the DHCP reservation create request")
-		}
-		created = true
-		rows, err = s.readDHCPReservations(ctx)
-		if err != nil {
-			return err
-		}
-		found, err := findDHCPReservation(rows, mac)
-		if err != nil {
-			return err
-		}
-		if found == nil || found.IPAddr != ip || found.Enabled != enabled {
-			return errors.New("DHCP reservation create could not be confirmed by readback")
-		}
-		return nil
-	})
-	return created, err
-}
-
-func (c *Client) DeleteDHCPReservation(ctx context.Context, mac string) error {
-	return c.withSession(ctx, func(s *routerSession) error {
-		rows, err := s.readDHCPReservations(ctx)
-		if err != nil {
-			return err
-		}
-		found, err := findDHCPReservation(rows, mac)
-		if err != nil {
-			return err
-		}
-		if found == nil {
-			return nil
-		}
-		if found.Index < 1 {
-			return errors.New("router returned an invalid DHCP reservation index")
-		}
-		result, err := s.writeDAL(ctx, http.MethodDelete, "static_dhcp", fmt.Sprint(found.Index), map[string]any{})
-		if err != nil {
-			return err
-		}
-		if result["result"] != "ZCFG_SUCCESS" {
-			return errors.New("router rejected the DHCP reservation delete request")
-		}
-		rows, err = s.readDHCPReservations(ctx)
-		if err != nil {
-			return err
-		}
-		remaining, err := findDHCPReservation(rows, mac)
-		if err != nil {
-			return err
-		}
-		if remaining != nil {
-			return errors.New("DHCP reservation delete could not be confirmed by readback")
-		}
-		return nil
-	})
-}
-
-func findDHCPReservation(rows []DHCPReservation, mac string) (*DHCPReservation, error) {
-	var found *DHCPReservation
-	for i := range rows {
-		if sameDHCPMAC(rows[i].MACAddr, mac) {
-			if found != nil {
-				return nil, errors.New("router returned multiple DHCP reservations for this MAC")
-			}
-			found = &rows[i]
-		}
-	}
-	return found, nil
-}
-
-func sameDHCPMAC(left, right string) bool {
-	canonicalLeft, leftErr := normalizeImportMAC(left)
-	canonicalRight, rightErr := normalizeImportMAC(right)
-	return leftErr == nil && rightErr == nil && canonicalLeft == canonicalRight
-}
-
-func (s *routerSession) readDHCPReservations(ctx context.Context) ([]DHCPReservation, error) {
-	response, err := s.get(ctx, "/cgi-bin/DAL?oid=static_dhcp&sessionkey="+url.QueryEscape(s.sessionKey))
-	if err != nil {
-		return nil, err
-	}
-	value, err := s.decryptResponse(response)
-	if err != nil {
-		return nil, err
-	}
-	if value["result"] != "ZCFG_SUCCESS" {
-		return nil, errors.New("router rejected the DHCP reservation read request")
-	}
-	objects, ok := value["Object"].([]any)
-	if !ok {
-		return nil, errors.New("router DHCP response did not contain a reservation list")
-	}
-	rows := make([]DHCPReservation, 0, len(objects))
-	for _, object := range objects {
-		row, ok := object.(map[string]any)
-		if !ok {
-			return nil, errors.New("router returned a malformed DHCP reservation")
-		}
-		index, ok := integerValue(row["Index"])
-		if !ok || index < 1 {
-			return nil, errors.New("router returned an invalid DHCP reservation index")
-		}
-		mac, macOK := row["MACAddr"].(string)
-		ip, ipOK := row["IPAddr"].(string)
-		enabled, enabledOK := row["Enable"].(bool)
-		if !macOK || !ipOK || !enabledOK {
-			return nil, errors.New("router returned an incomplete DHCP reservation")
-		}
-		parsedIP, err := netip.ParseAddr(ip)
-		if err != nil || !parsedIP.Is4() {
-			return nil, errors.New("router returned a DHCP reservation with an invalid IPv4 address")
-		}
-		canonicalMAC, err := normalizeImportMAC(mac)
-		if err != nil {
-			return nil, errors.New("router returned an invalid DHCP reservation MAC address")
-		}
-		rows = append(rows, DHCPReservation{Index: index, MACAddr: canonicalMAC, IPAddr: ip, Enabled: enabled})
-	}
-	return rows, nil
-}
-
-func integerValue(value any) (int64, bool) {
-	switch v := value.(type) {
-	case float64:
-		if v >= 1 && v == float64(int64(v)) {
-			return int64(v), true
-		}
-	case json.Number:
-		parsed, err := v.Int64()
-		return parsed, err == nil && parsed >= 1
-	case int64:
-		return v, v >= 1
-	case int:
-		return int64(v), v >= 1
-	}
-	return 0, false
 }
 
 func (s *routerSession) writeDAL(ctx context.Context, method, oid, index string, data map[string]any) (map[string]any, error) {
@@ -323,19 +128,19 @@ func (s *routerSession) writeDAL(ctx context.Context, method, oid, index string,
 	req.Header.Set("If-Modified-Since", "Thu, 01 Jun 1970 00:00:00 GMT")
 	response, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, &ambiguousWriteError{message: "router write request failed with an ambiguous outcome"}
+		return nil, &AmbiguousWriteError{message: "router write request failed with an ambiguous outcome"}
 	}
 	defer response.Body.Close()
 	content, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil || len(content) > maxResponseBytes {
-		return nil, &ambiguousWriteError{message: "router write response could not be read; outcome is ambiguous"}
+		return nil, &AmbiguousWriteError{message: "router write response could not be read; outcome is ambiguous"}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, &responseStatusError{status: response.StatusCode}
 	}
 	result, err := s.decryptResponse(content)
 	if err != nil {
-		return nil, &ambiguousWriteError{message: "router write response could not be decoded; outcome is ambiguous"}
+		return nil, &AmbiguousWriteError{message: "router write response could not be decoded; outcome is ambiguous"}
 	}
 	if rotated, ok := result["sessionkey"].(string); ok && rotated != "" {
 		s.sessionKey = rotated
@@ -512,4 +317,44 @@ func decryptCBC(key, iv, ciphertext []byte) ([]byte, error) {
 		}
 	}
 	return plain[:len(plain)-padding], nil
+}
+
+type responseStatusError struct{ status int }
+
+func (e *responseStatusError) Error() string {
+	return fmt.Sprintf("router returned HTTP status %d", e.status)
+}
+
+// AmbiguousWriteError means a write may have reached the router. Callers must
+// reconcile by natural identity rather than blindly retrying the write.
+type AmbiguousWriteError struct{ message string }
+
+func (e *AmbiguousWriteError) Error() string { return e.message }
+
+// NormalizeEndpoint accepts a hostname, IP address, or HTTP(S) origin.
+func NormalizeEndpoint(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("host cannot be empty")
+	}
+	if !strings.Contains(host, "://") {
+		host = "http://" + host
+	}
+	parsed, err := url.Parse(host)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || strings.ContainsAny(parsed.Host, " \t\r\n") {
+		return "", fmt.Errorf("host must be a hostname, IP address, or an HTTP(S) origin without credentials, a non-root path, query, or fragment")
+	}
+	if port := parsed.Port(); port != "" {
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return "", fmt.Errorf("host contains an invalid port")
+		}
+	}
+	if strings.HasSuffix(parsed.Host, ":") || strings.Contains(parsed.Host, "%") {
+		return "", fmt.Errorf("host contains an invalid hostname or port")
+	}
+	if net.ParseIP(parsed.Hostname()) == nil && strings.Contains(parsed.Hostname(), "_") {
+		return "", fmt.Errorf("host contains an invalid hostname")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }

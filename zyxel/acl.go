@@ -1,4 +1,4 @@
-package provider
+package zyxel
 
 import (
 	"context"
@@ -30,21 +30,15 @@ type ACLRule struct {
 	RouterIndex          int64
 }
 
+// ACLCreateOutcome describes a write even when CreateACLRule returns an error.
+// Applied means the router accepted the write, not that readback matched.
+// Ambiguous means acceptance is unknown. Either requires identity reconciliation
+// before retrying; Rule contains the observed supported row when available.
 type ACLCreateOutcome struct {
 	Applied   bool
 	Ambiguous bool
 	Rule      *ACLRule
 }
-
-type responseStatusError struct{ status int }
-
-func (e *responseStatusError) Error() string {
-	return fmt.Sprintf("router returned HTTP status %d", e.status)
-}
-
-type ambiguousWriteError struct{ message string }
-
-func (e *ambiguousWriteError) Error() string { return e.message }
 
 func (c *Client) ReadACLRule(ctx context.Context, name string) (ACLRule, error) {
 	var result ACLRule
@@ -68,7 +62,11 @@ func (c *Client) ReadACLRule(ctx context.Context, name string) (ACLRule, error) 
 
 func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutcome, error) {
 	var outcome ACLCreateOutcome
-	err := c.withSession(ctx, func(s *routerSession) error {
+	payload, err := rule.dalPayload()
+	if err != nil {
+		return outcome, err
+	}
+	err = c.withSession(ctx, func(s *routerSession) error {
 		rows, err := s.readACLRows(ctx)
 		if err != nil {
 			return err
@@ -90,13 +88,9 @@ func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutc
 			}
 		}
 
-		payload, err := rule.dalPayload()
-		if err != nil {
-			return err
-		}
 		response, err := s.writeDAL(ctx, http.MethodPost, firewallACLOID, "", payload)
 		if err != nil {
-			var ambiguous *ambiguousWriteError
+			var ambiguous *AmbiguousWriteError
 			var statusErr *responseStatusError
 			outcome.Ambiguous = errors.As(err, &ambiguous) || (errors.As(err, &statusErr) && statusErr.status >= 500)
 			return err

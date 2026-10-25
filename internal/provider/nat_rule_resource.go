@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -25,7 +27,7 @@ var (
 
 func NewNATRuleResource() resource.Resource { return &NATRuleResource{} }
 
-type NATRuleResource struct{ client *Client }
+type NATRuleResource struct{ client *zyxel.Client }
 
 type natRuleModel struct {
 	Name              types.String `tfsdk:"name"`
@@ -95,9 +97,9 @@ func (r *NATRuleResource) Configure(_ context.Context, req resource.ConfigureReq
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := req.ProviderData.(*zyxel.Client)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *Client, got %T.", req.ProviderData))
+		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *zyxel.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -126,14 +128,9 @@ func (r *NATRuleResource) Create(ctx context.Context, req resource.CreateRequest
 		resp.Diagnostics.AddError("Error creating NAT rule", fmt.Sprintf("creating NAT rule (%s): %s", plan.Name.ValueString(), err))
 		return
 	}
-	rows, err := r.client.NATRules(ctx)
+	found, err := r.client.ReadNATRule(ctx, plan.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading created NAT rule", fmt.Sprintf("reading NAT rule (%s): %s", plan.Name.ValueString(), err))
-		return
-	}
-	found, err := findNATRule(rows, plan.Name.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Ambiguous NAT rule", err.Error())
 		return
 	}
 	if found == nil {
@@ -154,14 +151,9 @@ func (r *NATRuleResource) Read(ctx context.Context, req resource.ReadRequest, re
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	rows, err := r.client.NATRules(ctx)
+	found, err := r.client.ReadNATRule(ctx, state.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading NAT rule", fmt.Sprintf("reading NAT rule (%s): %s", state.Name.ValueString(), err))
-		return
-	}
-	found, err := findNATRule(rows, state.Name.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Ambiguous NAT rule", err.Error())
 		return
 	}
 	if found == nil {
@@ -206,11 +198,11 @@ func (r *NATRuleResource) ImportState(ctx context.Context, req resource.ImportSt
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), name)...)
 }
 
-func modelNATRule(model natRuleModel) NATRule {
-	return NATRule{Name: model.Name.ValueString(), Protocol: model.Protocol.ValueString(), ExternalPortStart: model.ExternalPortStart.ValueInt64(), ExternalPortEnd: model.ExternalPortEnd.ValueInt64(), InternalClient: model.InternalClient.ValueString(), InternalPortStart: model.InternalPortStart.ValueInt64(), InternalPortEnd: model.InternalPortEnd.ValueInt64()}
+func modelNATRule(model natRuleModel) zyxel.NATRule {
+	return zyxel.NATRule{Name: model.Name.ValueString(), Protocol: model.Protocol.ValueString(), ExternalPortStart: model.ExternalPortStart.ValueInt64(), ExternalPortEnd: model.ExternalPortEnd.ValueInt64(), InternalClient: model.InternalClient.ValueString(), InternalPortStart: model.InternalPortStart.ValueInt64(), InternalPortEnd: model.InternalPortEnd.ValueInt64()}
 }
 
-func setNATComputed(model *natRuleModel, rule NATRule) {
+func setNATComputed(model *natRuleModel, rule zyxel.NATRule) {
 	model.Enabled = types.BoolValue(rule.Enabled)
 	model.RouterIndex = types.Int64Value(rule.Index)
 }

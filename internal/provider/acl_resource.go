@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -30,7 +32,7 @@ var (
 
 func NewACLRuleResource() resource.Resource { return &ACLRuleResource{} }
 
-type ACLRuleResource struct{ client *Client }
+type ACLRuleResource struct{ client *zyxel.Client }
 
 type aclRuleModel struct {
 	Name                 types.String `tfsdk:"name"`
@@ -110,9 +112,9 @@ func (r *ACLRuleResource) Configure(_ context.Context, req resource.ConfigureReq
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := req.ProviderData.(*zyxel.Client)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *Client, got %T.", req.ProviderData))
+		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *zyxel.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -210,7 +212,7 @@ func (r *ACLRuleResource) Read(ctx context.Context, req resource.ReadRequest, re
 		return
 	}
 	observed, err := r.client.ReadACLRule(ctx, state.Name.ValueString())
-	if errors.Is(err, ErrACLRuleNotFound) {
+	if errors.Is(err, zyxel.ErrACLRuleNotFound) {
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -249,7 +251,7 @@ func (r *ACLRuleResource) ImportState(ctx context.Context, req resource.ImportSt
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("name"), req.ID)...)
 }
 
-func modelACLRule(model aclRuleModel) ACLRule {
+func modelACLRule(model aclRuleModel) zyxel.ACLRule {
 	var sourceStart, sourceEnd *int64
 	if !model.SourcePortStart.IsNull() && !model.SourcePortStart.IsUnknown() {
 		value := model.SourcePortStart.ValueInt64()
@@ -259,7 +261,7 @@ func modelACLRule(model aclRuleModel) ACLRule {
 		value := model.SourcePortEnd.ValueInt64()
 		sourceEnd = &value
 	}
-	return ACLRule{
+	return zyxel.ACLRule{
 		Name: model.Name.ValueString(), Action: model.Action.ValueString(), Order: model.Order.ValueInt64(),
 		SourceCIDR: model.SourceCIDR.ValueString(), DestinationCIDR: model.DestinationCIDR.ValueString(),
 		DestinationPortStart: model.DestinationPortStart.ValueInt64(), DestinationPortEnd: model.DestinationPortEnd.ValueInt64(),
@@ -267,7 +269,7 @@ func modelACLRule(model aclRuleModel) ACLRule {
 	}
 }
 
-func modelFromACLRule(rule ACLRule) aclRuleModel {
+func modelFromACLRule(rule zyxel.ACLRule) aclRuleModel {
 	model := aclRuleModel{
 		Name: types.StringValue(rule.Name), Action: types.StringValue(rule.Action), Order: types.Int64Value(rule.Order),
 		SourceCIDR: types.StringValue(rule.SourceCIDR), DestinationCIDR: types.StringValue(rule.DestinationCIDR),
