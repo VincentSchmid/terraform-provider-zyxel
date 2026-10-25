@@ -17,7 +17,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 The provider uses the public, Terraform-independent
 `github.com/VincentSchmid/terraform-provider-zyxel/zyxel` Go package. It provides
-typed status, DHCP, NAT, and ACL operations, with authentication, session locking,
+typed status, DHCP, NAT, ACL, and firewall-settings operations, with session locking,
 identity resolution, validation, and write verification. Other Go programs can
 import it without importing the Terraform adapter.
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -22,7 +24,7 @@ var (
 
 func NewFirewallResource() resource.Resource { return &FirewallResource{} }
 
-type FirewallResource struct{ client *Client }
+type FirewallResource struct{ client *zyxel.Client }
 
 type firewallModel struct {
 	ID                   types.String `tfsdk:"id"`
@@ -53,9 +55,9 @@ func (r *FirewallResource) Configure(_ context.Context, req resource.ConfigureRe
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := req.ProviderData.(*zyxel.Client)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *Client, got %T.", req.ProviderData))
+		resp.Diagnostics.AddError("Unexpected resource configuration", fmt.Sprintf("Expected *zyxel.Client, got %T.", req.ProviderData))
 		return
 	}
 	r.client = client
@@ -81,7 +83,7 @@ func (r *FirewallResource) apply(ctx context.Context, plan *firewallModel, diagn
 		return false
 	}
 	plan.ID = types.StringValue("router")
-	applied, err := r.client.SetFirewall(ctx, FirewallSettings{IPv4Enabled: plan.IPv4Enabled.ValueBool(), IPv6Enabled: plan.IPv6Enabled.ValueBool(), SecurityLevel: plan.SecurityLevel.ValueString(), DoSProtectionEnabled: plan.DoSProtectionEnabled.ValueBool()})
+	applied, err := r.client.SetFirewall(ctx, zyxel.FirewallSettings{IPv4Enabled: plan.IPv4Enabled.ValueBool(), IPv6Enabled: plan.IPv6Enabled.ValueBool(), SecurityLevel: plan.SecurityLevel.ValueString(), DoSProtectionEnabled: plan.DoSProtectionEnabled.ValueBool()})
 	if err != nil {
 		detail := err.Error()
 		if applied {
@@ -152,7 +154,7 @@ func (firewallLevelValidator) ValidateString(_ context.Context, req validator.St
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
-	if _, ok := firewallLevels[req.ConfigValue.ValueString()]; !ok {
+	if value := req.ConfigValue.ValueString(); value != "low" && value != "medium" && value != "high" {
 		resp.Diagnostics.AddAttributeError(req.Path, "Invalid firewall security level", "security_level must be low, medium, or high.")
 	}
 }

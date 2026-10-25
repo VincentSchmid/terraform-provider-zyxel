@@ -1,4 +1,4 @@
-package provider
+package zyxel
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"net/url"
 )
 
+// FirewallSettings contains the supported router-wide General and DoS settings.
 type FirewallSettings struct {
 	IPv4Enabled          bool
 	IPv6Enabled          bool
@@ -52,7 +53,7 @@ func (c *Client) SetFirewall(ctx context.Context, settings FirewallSettings) (bo
 		for _, payload := range payloads {
 			result, err := s.writeDAL(ctx, http.MethodPut, "firewall", "", payload)
 			if err != nil {
-				var ambiguous *ambiguousWriteError
+				var ambiguous *AmbiguousWriteError
 				var status *responseStatusError
 				applied = applied || errors.As(err, &ambiguous) || (errors.As(err, &status) && status.status >= 500)
 				return err

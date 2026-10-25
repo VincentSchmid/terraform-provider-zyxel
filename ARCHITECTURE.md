@@ -13,6 +13,7 @@ zyxel/
     dhcp.go                     DHCP types, validation, identity, operations
     nat.go                      NAT types, validation, conflicts, operations
     acl.go                      ACL types, validation, profile, operations
+    firewall.go                 router-wide General and DoS settings
     *_test.go                   API tests and public usage example
 internal/
     provider/
@@ -68,6 +69,10 @@ an explicit architecture decision, documentation update, and matching tests.
   DHCP/NAT return a boolean indicating creation succeeded or may have succeeded.
   ACL returns `ACLCreateOutcome` with separate applied/ambiguous flags and an
   observed rule when available. An error does not necessarily mean no mutation.
+- Router-wide firewall settings are a singleton, not a row resource. `SetFirewall`
+  adopts/updates the built-in settings using the existing allowlisted PUTs. Its
+  boolean reports success or possible/partial application; Terraform destroy
+  relinquishes management without changing protection.
 - The API reports uncertainty; Terraform preserves recoverable identity in state.
   Direct Go callers must also reconcile before retrying uncertain writes.
 - Locks cover one client only, not other clients/processes or web-UI users.
