@@ -1,11 +1,11 @@
 ---
 name: Zyxel Router
-description: Look up AX7501-B0 router documentation, account permissions, LAN/WAN management access, and firmware-specific behavior for this Terraform provider.
+description: Look up Zyxel router documentation, account permissions, LAN/WAN management access, logging, and firmware compatibility for this Terraform provider.
 ---
 
 # Zyxel Router Documentation
 
-Use these references for questions about the Zyxel AX7501-B0 and the router
+Use these references for questions about supported Zyxel router series and the
 permissions needed by this provider. Fetch the relevant source before answering;
 do not treat this note as an API specification.
 
@@ -19,21 +19,23 @@ Apply the identity only to this repository or the individual commit, not global
 Git configuration. This convention does not authorize commits or pushes unless
 the user requests them.
 
-## Router Context
+## Documentation Scope and Privacy
 
-- Model reported by the user: AX7501-B0.
-- Firmware reported by the user: V5.17(ABWW.8)D0.
-- No documentation specific to that exact firmware build was found during the
-  lookup. Model-series manuals and newer series help are useful references, not
-  proof of exact-build behavior or verified DAL API authorization.
+- This is a public provider repository. Keep deployment-specific router models,
+  installed firmware versions, ISP details, addresses, account names and logging
+  state in the deployment's private infrastructure repository, not this skill.
+- Model names in documentation titles describe the manuals' coverage, not a
+  user's installed hardware. Match documentation to the target model and
+  firmware before claiming compatibility.
+- Model-series manuals and newer series help are useful references, not proof
+  of exact-build behavior or verified DAL API authorization.
 
 ## Documentation Links
 
 1. Official Zyxel AX/DX/EX/PX-series help: User Account, including Group and
    Remote Privilege definitions:
    https://service-provider.zyxel.com/compact-help/AX-DX-EX-PX-Series/AX-DX-EX-PX_5-70/h_Maintenance_UserAccount_AddEdit.html
-   This is newer 5.70-series help, not documentation specific to the reported
-   V5.17 build.
+   This is 5.70-series help; it does not establish behavior on other builds.
 2. EX5501-B0 / AX7501-B0 / PX7501-B0 User's Guide, chapter 32, page 290:
    https://www.manualslib.com/manual/1864676/Zyxel-Communications-Ex5501-B0.html?page=290
    Documents Administrator versus User privileges and administrator-only
@@ -43,6 +45,11 @@ the user requests them.
    https://www.manualslib.com/manual/1864676/Zyxel-Communications-Ex5501-B0.html?page=289
 4. Full model-series guide PDF, hosted by a third party:
    https://aselcom.com/Anexos%20PS/Manuales/EX5501-B0_User%27s_Guide_V5.pdf
+5. Official series help for Maintenance > Log Setting:
+   https://service-provider.zyxel.com/compact-help/AX-DX-EX-PX-Series/AX-DX-EX-PX_5-70/h_Maintenance_LogSetting.html
+   Documents Syslog Logging, Local File versus Remote mode, and the Active Log
+   categories for System Log and Security Log. Verify labels on the target
+   firmware; this reference does not establish that logging is enabled.
 
 ## Account Permissions
 
