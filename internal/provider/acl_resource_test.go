@@ -14,13 +14,15 @@ import (
 func TestACLCreateRejectsUnknownPlannedInputsBeforeRouterAccess(t *testing.T) {
 	model := aclRuleModel{
 		Name: types.StringValue("acl"), Action: types.StringValue("accept"), Order: types.Int64Unknown(),
+		Protocol: types.StringValue("tcp"), IPVersion: types.StringUnknown(), Direction: types.StringUnknown(),
+		MACAddress: types.StringUnknown(), Service: types.StringUnknown(), TCPFlag: types.StringUnknown(),
 		SourceCIDR: types.StringValue("0.0.0.0/0"), DestinationCIDR: types.StringValue("203.0.113.10/32"),
 		DestinationPortStart: types.Int64Value(443), DestinationPortEnd: types.Int64Value(443),
 		SourcePortStart: types.Int64Unknown(), SourcePortEnd: types.Int64Null(), Enabled: types.BoolValue(true),
 		PacketsPerUnit: types.Int64Unknown(), RateLimitUnit: types.StringValue("minute"),
 	}
 	unknown := unknownACLPlanAttributes(model)
-	for _, name := range []string{"order", "source_port_start", "packets_per_unit"} {
+	for _, name := range []string{"order", "source_port_start", "packets_per_unit", "ip_version", "direction", "mac_address", "service", "tcp_flag"} {
 		found := false
 		for _, item := range unknown {
 			if item == name {
@@ -30,6 +32,35 @@ func TestACLCreateRejectsUnknownPlannedInputsBeforeRouterAccess(t *testing.T) {
 		if !found {
 			t.Errorf("unknown input %q was not detected: %v", name, unknown)
 		}
+	}
+}
+
+func TestACLModelMapsFilterFields(t *testing.T) {
+	model := aclRuleModel{
+		Name: types.StringValue("filters"), Action: types.StringValue("reject"), Order: types.Int64Value(5),
+		Protocol: types.StringValue("tcp"), IPVersion: types.StringValue("ipv6"),
+		Direction: types.StringValue("lan_to_wan"), MACAddress: types.StringValue("AA:BB:CC:DD:EE:FF"),
+		Service: types.StringValue("custom-https"), TCPFlag: types.StringValue("syn"),
+		SourceCIDR: types.StringValue("2001:db8::/32"), DestinationCIDR: types.StringValue("2001:db8:1::/64"),
+		DestinationPortStart: types.Int64Value(443), DestinationPortEnd: types.Int64Value(443),
+		SourcePortStart: types.Int64Null(), SourcePortEnd: types.Int64Null(), Enabled: types.BoolValue(true),
+		RateLimitUnit: types.StringValue("minute"),
+	}
+	rule := modelACLRule(model)
+	if rule.IPVersion != "ipv6" || rule.Direction != "lan_to_wan" || rule.MACAddress != "AA:BB:CC:DD:EE:FF" || rule.Service != "custom-https" || rule.TCPFlag != "syn" {
+		t.Fatalf("model did not map filter fields: %#v", rule)
+	}
+	rounded := modelFromACLRule(rule)
+	if rounded.IPVersion.ValueString() != "ipv6" || rounded.Direction.ValueString() != "lan_to_wan" ||
+		rounded.MACAddress.ValueString() != "AA:BB:CC:DD:EE:FF" || rounded.Service.ValueString() != "custom-https" ||
+		rounded.TCPFlag.ValueString() != "syn" {
+		t.Fatalf("model round trip lost filter fields: %#v", rounded)
+	}
+	model.IPVersion, model.Direction = types.StringNull(), types.StringNull()
+	model.MACAddress, model.Service, model.TCPFlag = types.StringNull(), types.StringNull(), types.StringNull()
+	rule = modelACLRule(model)
+	if rule.IPVersion != "ipv4" || rule.Direction != "wan_to_lan" || rule.MACAddress != "" || rule.Service != "" || rule.TCPFlag != "" {
+		t.Fatalf("model did not apply filter defaults: %#v", rule)
 	}
 }
 
@@ -149,7 +180,7 @@ func TestACLClientMissingReadAndDeleteAreIdempotent(t *testing.T) {
 }
 
 func testACLRule(name, action string, order int64) zyxel.ACLRule {
-	return zyxel.ACLRule{Name: name, Action: action, Order: order, SourceCIDR: "198.51.100.0/24", DestinationCIDR: "203.0.113.10/32", DestinationPortStart: 443, DestinationPortEnd: 443, Enabled: true}
+	return zyxel.ACLRule{Name: name, Action: action, Order: order, Protocol: "tcp", SourceCIDR: "198.51.100.0/24", DestinationCIDR: "203.0.113.10/32", DestinationPortStart: int64Pointer(443), DestinationPortEnd: int64Pointer(443), Enabled: true}
 }
 
 func fixtureACLRow(name string, index, order int) map[string]any {

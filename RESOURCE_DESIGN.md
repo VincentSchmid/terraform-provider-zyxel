@@ -132,7 +132,7 @@ it.
 | --- | --- | --- | --- | --- |
 | 1 | `zyxel_dns_record` | `dns` | Hostname, unique within this router | `hostname`, `ipv4_address` |
 | Implemented | `zyxel_dhcp_reservation` | `static_dhcp` | Canonical uppercase MAC address | `mac_address`, `ipv4_address`, `enabled` (true only); fixed default LAN bridge |
-| Implemented | `zyxel_acl_rule` | `firewall_acl` | Unique `name`; import existing rows before Terraform manages them | `name`, `action`, `order`, `source_cidr`, `destination_cidr`, destination/source port ranges, `enabled` |
+| Implemented | `zyxel_acl_rule` | `firewall_acl` | Unique `name`; import existing rows before Terraform manages them | `name`, `action`, `order`, `protocol`, `ip_version`, `direction`, `source_cidr`, `destination_cidr`, destination/source port ranges, `mac_address`, `service`, `tcp_flag`, rate limit, `enabled` |
 | 4 | `zyxel_nat_rule` | `nat` | Unique `name` mapped to DAL `Description`; verify uniqueness first | `name`, `protocol`, `external_port_start`, `external_port_end`, `internal_client`, `internal_port_start`, `internal_port_end`, `enabled` |
 | 5 | `zyxel_static_route` | `static_route` | Unique route `name` | `name`, `destination_cidr`, `gateway`, `interface`, `enabled` |
 
@@ -159,19 +159,26 @@ from `firewall_cf.py` directly in Go. The provider has no runtime dependency
 on the script or Python. See [the generated resource documentation](docs/resources/acl_rule.md)
 for the current schema, lifecycle, and import example.
 
-The implemented scope is IPv4, TCP, WAN-to-LAN, all interfaces, custom service
-index `0`, no schedule or MAC filter, and empty IPv6 filter fields. Optional
-packet rate limiting is supported for `accept` rules through `packets_per_unit`
-(1–512 packets) and `rate_limit_unit` (`minute` or `second`). Other protocols,
-directions, interfaces, schedules, and service profiles remain outside this
-initial resource. Unrelated ACL entries remain untouched.
+The implemented scope covers the fields exposed by the router's Edit ACL Rule
+screen for a rule with interface `ALL`: `action` (`accept`/`drop`/`reject`),
+`protocol` (`all`, `tcp_udp`, `tcp`, `udp`, `icmp`, `icmpv6`), `ip_version`
+(IPv4/IPv6), `direction`, source/destination CIDRs, destination and source port
+ranges, `mac_address`, custom `service` groups, `tcp_flag`, and packet rate
+limiting for `accept` rules through `packets_per_unit` (1–512 packets) and
+`rate_limit_unit` (`minute` or `second`). Interface selection and schedule rules
+remain outside this resource; schedule references are rejected on read.
+Unrelated ACL entries remain untouched.
 
-Required configuration: exact unique `name`, `action` (`accept`/`drop`),
-positive explicit `order`, canonical IPv4 `destination_cidr`, and
-`destination_port_start`/`destination_port_end`. `source_cidr` defaults to
-`0.0.0.0/0`; `enabled` defaults to `true`. Optional source port bounds must be
-set together, or both null for any source port. Every configurable field
-requires replacement; no undocumented PUT or reorder operation is called.
+Required configuration: exact unique `name`, `action`, positive explicit
+`order`, and canonical `destination_cidr`. `protocol` defaults to `tcp`,
+`ip_version` to `ipv4`, `direction` to `wan_to_lan`, `source_cidr` to
+`0.0.0.0/0`, and `enabled` to `true`. With `ip_version = "ipv6"` both CIDRs
+must be IPv6. Destination and source port bounds must each be set together, or
+both null for any port, and are only accepted for `tcp`, `udp`, and `tcp_udp`.
+`tcp_flag` is only accepted for `tcp` and `tcp_udp`. A custom service is resolved
+by name against the router's `firewall_proto` table on create and by the
+router-returned `ServiceName` on read. Every configurable field requires
+replacement; no undocumented PUT or reorder operation is called.
 
 The name is the state/import identity. Import supports only the implemented
 profile. Existing names require explicit import; duplicate names are errors.
