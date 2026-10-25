@@ -63,8 +63,8 @@ This is a provider convention, not a router uniqueness guarantee. The row
 `Index` is computed as `router_index` and refreshed before deletion.
 
 Configurable fields are `name`, `protocol` (`tcp`, `udp`, `both`, `all`),
-`external_port_start`, `external_port_end`, `internal_client` (IPv4),
-`internal_port_start`, and `internal_port_end`. All require replacement;
+`external_ports`, `internal_client` (IPv4), and `translation_ports`. The port
+strings accept a single port or inclusive range with equal lengths. All require replacement;
 there is no verified PUT. Port bounds must be ordered, within 1–65535,
 and map equal-length ranges. Create rejects external-port overlaps for
 intersecting protocols on enabled rules, regardless of interface. This is a
@@ -133,7 +133,7 @@ it.
 | 1 | `zyxel_dns_record` | `dns` | Hostname, unique within this router | `hostname`, `ipv4_address` |
 | Implemented | `zyxel_dhcp_reservation` | `static_dhcp` | Canonical uppercase MAC address | `mac_address`, `ipv4_address`, `enabled` (true only); fixed default LAN bridge |
 | Implemented | `zyxel_acl_rule` | `firewall_acl` | Unique `name`; import existing rows before Terraform manages them | `name`, `action`, `order`, `protocol`, `ip_version`, `direction`, `source_cidr`, `destination_cidr`, destination/source port ranges, `mac_address`, `service`, `tcp_flag`, rate limit, `enabled` |
-| 4 | `zyxel_nat_rule` | `nat` | Unique `name` mapped to DAL `Description`; verify uniqueness first | `name`, `protocol`, `external_port_start`, `external_port_end`, `internal_client`, `internal_port_start`, `internal_port_end`, `enabled` |
+| 4 | `zyxel_nat_rule` | `nat` | Unique `name` mapped to DAL `Description`; verify uniqueness first | `name`, `protocol`, `external_ports`, `internal_client`, `translation_ports`, `enabled` |
 | 5 | `zyxel_static_route` | `static_route` | Unique route `name` | `name`, `destination_cidr`, `gateway`, `interface`, `enabled` |
 
 The CLI demonstrates create, list, and delete for DNS, DHCP, NAT, and routes;
