@@ -5,7 +5,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 > **Status: experimental.** Read paths and the mock-router lifecycle tests pass,
 > and a read-only `terraform plan` has been verified against a physical router.
-> **Live writes (NAT, DHCP, firewall ACL) have not been verified on hardware.**
+> **Live writes (NAT, DHCP, firewall ACL, general firewall settings) have not been verified on hardware.**
 > Review every plan before applying, and keep a router configuration backup.
 
 ## Requirements
@@ -77,6 +77,7 @@ several Terraform processes against the router at the same time.
 | `zyxel_dhcp_reservation` | resource | Enabled static DHCP reservation by MAC address |
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
 | `zyxel_acl_rule` | resource | IPv4 TCP WAN-to-LAN firewall ACL entry |
+| `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
 
 Full documentation is on the
 [Terraform Registry](https://registry.terraform.io/providers/VincentSchmid/zyxel/latest/docs)
@@ -88,6 +89,13 @@ and in [`docs/`](docs), with examples in [`examples/`](examples).
 provider "zyxel" {}
 
 data "zyxel_status" "router" {}
+
+resource "zyxel_firewall" "router" {
+  ipv4_enabled           = true
+  ipv6_enabled           = true
+  security_level         = "medium"
+  dos_protection_enabled = true
+}
 
 resource "zyxel_nat_rule" "https" {
   name                = "HTTPS"
@@ -120,7 +128,9 @@ resource "zyxel_acl_rule" "cloudflare" {
 }
 ```
 
-## Behavior shared by the managed resources
+## Behavior of managed table entries
+
+The following behavior applies to DHCP reservations, NAT rules, and ACL rules.
 
 - **Names are identities.** `zyxel_nat_rule` and `zyxel_acl_rule` use the router
   entry name as identity and import key; `zyxel_dhcp_reservation` uses the MAC
@@ -141,6 +151,30 @@ Import examples:
 terraform import zyxel_nat_rule.https 'HTTPS'
 terraform import zyxel_acl_rule.cloudflare 'Cloudflare-104.16.0.0-13'
 terraform import zyxel_dhcp_reservation.nas '02:00:00:00:00:20'
+```
+
+## General firewall settings
+
+`zyxel_firewall` groups **Firewall > General** and **Firewall > DoS** settings:
+`ipv4_enabled`, `ipv6_enabled`, `security_level` (`low`, `medium`, or `high`),
+and `dos_protection_enabled`. All four values are required and update in place.
+`medium` corresponds to the UI's recommended security level. Disabling either
+firewall is not recommended by Zyxel.
+
+This is a built-in, router-wide configuration: Create adopts and configures it.
+Manage only one instance per router, including across Terraform states. Reads
+track UI changes. Writes send only the General screen's fields and the DoS
+screen's toggle; ACL rules remain separate `zyxel_acl_rule` resources.
+The UI maps Low/Medium/High to DAL `Level_GUI` values `Off`/`Low`/`High`;
+Terraform uses the UI names, not those internal values.
+
+General and DoS updates use separate requests and are not atomic. If a write
+fails, inspect the router and refresh state before retrying. Destroy leaves all
+settings unchanged and only removes Terraform management. Import without
+changing the current settings:
+
+```sh
+terraform import zyxel_firewall.router router
 ```
 
 ## Cloudflare IPv4 ranges
