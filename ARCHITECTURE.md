@@ -13,6 +13,7 @@ zyxel/
     dhcp.go                     DHCP types, validation, identity, operations
     nat.go                      NAT types, validation, conflicts, operations
     acl.go                      ACL types, validation, profile, operations
+    service.go                  reusable protocol services and compact port syntax
     firewall.go                 router-wide General and DoS settings
     *_test.go                   API tests and public usage example
 internal/
@@ -69,6 +70,9 @@ an explicit architecture decision, documentation update, and matching tests.
   DHCP/NAT return a boolean indicating creation succeeded or may have succeeded.
   ACL returns `ACLCreateOutcome` with separate applied/ambiguous flags and an
   observed rule when available. An error does not necessarily mean no mutation.
+- Services use exact names for CRUD/import and expose native `Iid` as `id` for
+  ACL references. ACL writes resolve native IDs to current display indexes.
+  Service deletion rejects remaining ACL references to prevent cascading loss.
 - Router-wide firewall settings are a singleton, not a row resource. `SetFirewall`
   adopts/updates the built-in settings using the existing allowlisted PUTs. Its
   boolean reports success or possible/partial application; Terraform destroy

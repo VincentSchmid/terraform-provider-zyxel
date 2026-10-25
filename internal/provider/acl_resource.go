@@ -44,6 +44,9 @@ type aclRuleModel struct {
 	Direction            types.String `tfsdk:"direction"`
 	MACAddress           types.String `tfsdk:"mac_address"`
 	Service              types.String `tfsdk:"service"`
+	ServiceID            types.String `tfsdk:"service_id"`
+	SourcePorts          types.String `tfsdk:"source_ports"`
+	DestinationPorts     types.String `tfsdk:"destination_ports"`
 	TCPFlag              types.String `tfsdk:"tcp_flag"`
 	SourceCIDR           types.String `tfsdk:"source_cidr"`
 	DestinationCIDR      types.String `tfsdk:"destination_cidr"`
@@ -82,9 +85,9 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: replaceInt, Validators: []validator.Int64{aclInt64Validator{minimum: 1}},
 			},
 			"protocol": schema.StringAttribute{
-				Optional: true, Computed: true, Default: stringdefault.StaticString("tcp"),
-				MarkdownDescription: "Transport protocol: `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`. `tcp_udp` is the router's TCP/UDP service. Defaults to `tcp`; changing it replaces the ACL rule.",
-				PlanModifiers:       replaceString, Validators: []validator.String{aclProtocolValidator{}},
+				Optional: true, Computed: true,
+				MarkdownDescription: "Transport protocol: `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`. Defaults to `tcp` for inline rules. Omit when using `service_id`; the neutral `all` value is then computed and the service selects the protocol. Changing it replaces the ACL rule.",
+				PlanModifiers:       []planmodifier.String{aclProtocolDefault{}, stringplanmodifier.RequiresReplace()}, Validators: []validator.String{aclProtocolValidator{}},
 			},
 			"ip_version": schema.StringAttribute{
 				Optional: true, Computed: true, Default: stringdefault.StaticString("ipv4"),
@@ -103,6 +106,18 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"service": schema.StringAttribute{
 				Optional: true, MarkdownDescription: "Optional name of a custom protocol/service group on the router. Omit for none. The service must already exist; this resource does not create it. Changing it replaces the ACL rule.",
 				PlanModifiers: replaceString, Validators: []validator.String{aclServiceValidator{}},
+			},
+			"service_id": schema.StringAttribute{
+				Optional: true, MarkdownDescription: "Native custom service ID, for example `zyxel_service.https.id`. Mutually exclusive with `service` and inline protocol/port/TCP flag settings. Changing it replaces the rule.",
+				PlanModifiers: replaceString,
+			},
+			"source_ports": schema.StringAttribute{
+				Optional: true, MarkdownDescription: "Source ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with numeric source port bounds and `service_id`. TCP/UDP protocols only. Changing it replaces the rule.",
+				PlanModifiers: replaceString, Validators: []validator.String{portsValidator{}},
+			},
+			"destination_ports": schema.StringAttribute{
+				Optional: true, MarkdownDescription: "Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with numeric destination port bounds and `service_id`. TCP/UDP protocols only. Changing it replaces the rule.",
+				PlanModifiers: replaceString, Validators: []validator.String{portsValidator{}},
 			},
 			"tcp_flag": schema.StringAttribute{
 				Optional: true, MarkdownDescription: "Optional TCP flag to match: `syn`, `ack`, `urg`, `psh`, `rst`, or `fin`. Omit for any flag. Only valid with the `tcp` and `tcp_udp` protocols. Changing it replaces the ACL rule.",
@@ -173,6 +188,30 @@ func (r *ACLRuleResource) ValidateConfig(ctx context.Context, req resource.Valid
 		return
 	}
 	usesPorts := true
+	if !config.ServiceID.IsNull() {
+		for name, value := range map[string]types.String{"service": config.Service, "protocol": config.Protocol, "source_ports": config.SourcePorts, "destination_ports": config.DestinationPorts, "tcp_flag": config.TCPFlag} {
+			if !value.IsNull() {
+				resp.Diagnostics.AddAttributeError(path.Root(name), "Conflicting service filter", "service_id cannot be combined with inline protocol, ports, TCP flags, or service name.")
+			}
+		}
+		for name, value := range map[string]types.Int64{"source_port_start": config.SourcePortStart, "source_port_end": config.SourcePortEnd, "destination_port_start": config.DestinationPortStart, "destination_port_end": config.DestinationPortEnd} {
+			if !value.IsNull() {
+				resp.Diagnostics.AddAttributeError(path.Root(name), "Conflicting service filter", "service_id cannot be combined with inline ports.")
+			}
+		}
+	}
+	for _, pair := range []struct {
+		name       string
+		value      types.String
+		start, end types.Int64
+	}{{"source_ports", config.SourcePorts, config.SourcePortStart, config.SourcePortEnd}, {"destination_ports", config.DestinationPorts, config.DestinationPortStart, config.DestinationPortEnd}} {
+		if !pair.value.IsNull() && (!pair.start.IsNull() || !pair.end.IsNull()) {
+			resp.Diagnostics.AddAttributeError(path.Root(pair.name), "Conflicting port syntax", "Use compact ports or numeric bounds, not both.")
+		}
+		if !pair.value.IsNull() && !config.Protocol.IsUnknown() && !config.Protocol.IsNull() && !aclProtocolSupportsPorts(config.Protocol.ValueString()) {
+			resp.Diagnostics.AddAttributeError(path.Root(pair.name), "Protocol does not use ports", "Compact ports require tcp, udp, or tcp_udp.")
+		}
+	}
 	if !config.Protocol.IsUnknown() && !config.Protocol.IsNull() {
 		usesPorts = aclProtocolSupportsPorts(config.Protocol.ValueString())
 	}
@@ -258,7 +297,7 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 		if outcome.Applied || outcome.Ambiguous {
 			state := plan
 			if outcome.Rule != nil {
-				state = modelFromACLRule(*outcome.Rule)
+				state = aclObservedModel(*outcome.Rule, plan)
 			} else {
 				state.RouterIndex = types.Int64Null()
 			}
@@ -271,7 +310,7 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 		resp.Diagnostics.AddError("Unable to confirm ACL rule", "The router did not confirm the ACL rule create by name and readback.")
 		return
 	}
-	state := modelFromACLRule(*outcome.Rule)
+	state := aclObservedModel(*outcome.Rule, plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -283,6 +322,7 @@ func unknownACLPlanAttributes(model aclRuleModel) []string {
 		"mac_address": model.MACAddress, "service": model.Service, "tcp_flag": model.TCPFlag,
 		"source_cidr": model.SourceCIDR, "destination_cidr": model.DestinationCIDR,
 		"rate_limit_unit": model.RateLimitUnit,
+		"service_id":      model.ServiceID, "source_ports": model.SourcePorts, "destination_ports": model.DestinationPorts,
 	} {
 		if value.IsUnknown() {
 			unknown = append(unknown, name)
@@ -323,7 +363,7 @@ func (r *ACLRuleResource) Read(ctx context.Context, req resource.ReadRequest, re
 		resp.Diagnostics.AddError("Error reading ACL rule", fmt.Sprintf("reading ACL rule (%s): %s", state.Name.ValueString(), err))
 		return
 	}
-	state = modelFromACLRule(observed)
+	state = aclObservedModel(observed, state)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -394,6 +434,7 @@ func modelACLRule(model aclRuleModel) zyxel.ACLRule {
 		Name: model.Name.ValueString(), Action: model.Action.ValueString(), Order: model.Order.ValueInt64(),
 		Protocol: model.Protocol.ValueString(), IPVersion: ipVersion, Direction: direction,
 		MACAddress: aclModelString(model.MACAddress), Service: aclModelString(model.Service),
+		ServiceID: aclModelString(model.ServiceID), SourcePorts: aclModelString(model.SourcePorts), DestinationPorts: aclModelString(model.DestinationPorts),
 		TCPFlag:    aclModelString(model.TCPFlag),
 		SourceCIDR: model.SourceCIDR.ValueString(), DestinationCIDR: model.DestinationCIDR.ValueString(),
 		DestinationPortStart: destinationStart, DestinationPortEnd: destinationEnd,
@@ -419,6 +460,7 @@ func modelFromACLRule(rule zyxel.ACLRule) aclRuleModel {
 		Enabled: types.BoolValue(rule.Enabled), RouterIndex: types.Int64Value(rule.RouterIndex),
 		SourcePortStart: types.Int64Null(), SourcePortEnd: types.Int64Null(),
 		PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringValue("minute"),
+		ServiceID: types.StringNull(), SourcePorts: types.StringNull(), DestinationPorts: types.StringNull(),
 	}
 	model.MACAddress = types.StringNull()
 	if rule.MACAddress != "" {
@@ -451,6 +493,79 @@ func modelFromACLRule(rule zyxel.ACLRule) aclRuleModel {
 		model.RateLimitUnit = types.StringValue(rule.RateLimitUnit)
 	}
 	return model
+}
+
+// Keep the configured spelling and representation while still exposing drift.
+func aclObservedModel(rule zyxel.ACLRule, previous aclRuleModel) aclRuleModel {
+	model := modelFromACLRule(rule)
+	if !previous.ServiceID.IsNull() {
+		model.Service = types.StringNull()
+		model.ServiceID = types.StringNull()
+		if rule.ServiceID != "" {
+			model.ServiceID = types.StringValue(rule.ServiceID)
+		}
+	}
+	for _, pair := range []struct {
+		old    types.String
+		target *types.String
+		a, b   *int64
+	}{
+		{previous.SourcePorts, &model.SourcePorts, rule.SourcePortStart, rule.SourcePortEnd},
+		{previous.DestinationPorts, &model.DestinationPorts, rule.DestinationPortStart, rule.DestinationPortEnd},
+	} {
+		if pair.old.IsNull() {
+			continue
+		}
+		value := zyxel.FormatPorts(pair.a, pair.b)
+		if a, b, err := zyxel.ParsePorts(pair.old.ValueString()); err == nil && zyxel.FormatPorts(a, b) == value {
+			value = pair.old.ValueString()
+		}
+		*pair.target = types.StringValue(value)
+	}
+	if !previous.SourcePorts.IsNull() {
+		model.SourcePortStart, model.SourcePortEnd = types.Int64Null(), types.Int64Null()
+	}
+	if !previous.DestinationPorts.IsNull() {
+		model.DestinationPortStart, model.DestinationPortEnd = types.Int64Null(), types.Int64Null()
+	}
+	return model
+}
+
+type portsValidator struct{}
+
+func (portsValidator) Description(context.Context) string {
+	return "must be *, a port, or start-end (1-65535)"
+}
+func (v portsValidator) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
+func (portsValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	_, _, err := zyxel.ParsePorts(req.ConfigValue.ValueString())
+	if err != nil || req.ConfigValue.ValueString() == "" {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid ports", "Use *, a port, or an ordered start-end range from 1 through 65535.")
+	}
+}
+
+type aclProtocolDefault struct{}
+
+func (aclProtocolDefault) Description(context.Context) string {
+	return "defaults to tcp for inline rules or all when using service_id"
+}
+func (v aclProtocolDefault) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+func (aclProtocolDefault) PlanModifyString(ctx context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if !req.ConfigValue.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var id types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("service_id"), &id)...)
+	if id.IsNull() {
+		resp.PlanValue = types.StringValue("tcp")
+	} else {
+		resp.PlanValue = types.StringValue("all")
+	}
 }
 
 type aclNameValidator struct{}

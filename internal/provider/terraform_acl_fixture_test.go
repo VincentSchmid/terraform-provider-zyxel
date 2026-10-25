@@ -28,6 +28,7 @@ type terraformACLFixture struct {
 	sessions            map[string]*terraformACLSession
 	rows                []map[string]any
 	services            []map[string]any
+	serviceSequence     int
 	sequence            int
 	posts               int
 	deletes             int
@@ -51,7 +52,7 @@ func newTerraformACLFixture(t *testing.T) *terraformACLFixture {
 	}
 	f := &terraformACLFixture{key: key, sessions: map[string]*terraformACLSession{}}
 	// Deliberately outside the managed profile: CRUD must leave it alone.
-	f.rows = []map[string]any{{"Name": "unmanaged", "Order": 1, "Protocol": "UDP", "Direction": "LAN_TO_WAN", "Interface": "LAN"}}
+	f.rows = []map[string]any{{"Name": "unmanaged", "Order": 1, "Protocol": "UDP", "Direction": "LAN_TO_WAN", "Interface": "LAN", "X_ZYXEL_ServiceIndex": 0}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
 	t.Cleanup(f.server.Close)
 	return f
@@ -113,17 +114,21 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if r.Method == http.MethodGet {
-			if oid == "firewall_proto" {
-				services := make([]map[string]any, len(f.services))
-				for i, service := range f.services {
-					services[i] = map[string]any{"Index": i + 1, "Iid": service["Iid"], "Name": service["Name"]}
-				}
-				f.reply(w, s, map[string]any{"result": "ZCFG_SUCCESS", "Object": services})
-				return
-			}
 			if f.brokenReads || f.failNextRead {
 				f.failNextRead = false
 				http.Error(w, "fixture read failure", http.StatusServiceUnavailable)
+				return
+			}
+			if oid == "firewall_proto" {
+				services := make([]map[string]any, len(f.services))
+				for i, service := range f.services {
+					services[i] = map[string]any{}
+					for key, value := range service {
+						services[i][key] = value
+					}
+					services[i]["Index"] = i + 1
+				}
+				f.reply(w, s, map[string]any{"result": "ZCFG_SUCCESS", "Object": services})
 				return
 			}
 			rows := make([]map[string]any, len(f.rows))
@@ -147,10 +152,6 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			f.reply(w, s, map[string]any{"result": "ZCFG_SUCCESS", "Object": rows})
 			return
 		}
-		if oid != "firewall_acl" {
-			http.Error(w, "unsupported OID write", http.StatusMethodNotAllowed)
-			return
-		}
 		if r.Header.Get("CSRFToken") != s.token || r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.Header.Get("If-Modified-Since") == "" {
 			http.Error(w, "missing write headers", http.StatusForbidden)
 			return
@@ -164,6 +165,44 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		var body map[string]any
 		if err != nil || json.Unmarshal(plain, &body) != nil {
 			http.Error(w, "bad ciphertext", http.StatusBadRequest)
+			return
+		}
+		if oid == "firewall_proto" {
+			switch r.Method {
+			case http.MethodPost:
+				f.serviceSequence++
+				body["Iid"] = 100 + f.serviceSequence
+				switch body["Protocol"] {
+				case "TCP":
+					body["Protocol"] = 6
+				case "UDP":
+					body["Protocol"] = 17
+				case "ICMP":
+					body["Protocol"] = 1
+				case "ICMPv6":
+					body["Protocol"] = 58
+				case "Other":
+					body["Protocol"] = body["ProtocolNumber"]
+				}
+				f.services = append(f.services, body)
+				f.failNextRead = f.failReadback
+			case http.MethodDelete:
+				index, _ := strconv.Atoi(r.URL.Query().Get("Index"))
+				if index < 1 || index > len(f.services) {
+					http.Error(w, "invalid service index", 400)
+					return
+				}
+				f.services = append(f.services[:index-1], f.services[index:]...)
+			default:
+				http.Error(w, "unsupported service write", 405)
+				return
+			}
+			f.rotate(s)
+			if r.Method == http.MethodPost && f.failPostAfterCommit {
+				http.Error(w, "fixture service failure after commit", http.StatusInternalServerError)
+				return
+			}
+			f.reply(w, s, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": s.token})
 			return
 		}
 		switch r.Method {

@@ -94,6 +94,17 @@ The router firmware limits concurrent administrator logins. Operations sharing
 one provider client are serialized, but avoid running several Terraform
 processes against the router at the same time.
 
+## Firewall Services
+
+Use `zyxel_service` to manage reusable TCP, UDP, ICMP, ICMPv6, or other IP
+protocol objects and reference them with `zyxel_acl_rule.service_id`. Both
+services and inline ACLs accept compact `source_ports` and `destination_ports`
+selectors such as `"*"`, `"443"`, and `"443-445"`.
+
+Service deletion is refused while any ACL references it, to prevent the router
+from cascading deletion to associated rules. See the service resource docs for
+replacement safety and examples.
+
 ## Schema
 
 ### Optional

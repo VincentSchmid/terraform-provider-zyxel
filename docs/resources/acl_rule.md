@@ -3,12 +3,12 @@
 page_title: "zyxel_acl_rule Resource - zyxel"
 subcategory: ""
 description: |-
-  Manages one firewall ACL entry in the router's firewall_acl table. Interface selection is fixed to ALL, and schedule rules are not exposed yet. The protocol can be all, tcp_udp, tcp, udp, icmp, or icmpv6; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for accept rules. Existing rows must be imported by exact name. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
+  Manages one firewall ACL entry in the router's firewall_acl table. Interface selection is fixed to ALL, and schedule rules are not exposed yet. The protocol can be all, tcp_udp, tcp, udp, icmp, or icmpv6; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for accept rules. Existing rows must be imported by exact name; imported rows outside this supported profile are rejected. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
 ---
 
 # zyxel_acl_rule (Resource)
 
-Manages one firewall ACL entry in the router's `firewall_acl` table. Interface selection is fixed to `ALL`, and schedule rules are not exposed yet. The protocol can be `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
+Manages one firewall ACL entry in the router's `firewall_acl` table. Interface selection is fixed to `ALL`, and schedule rules are not exposed yet. The protocol can be `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name; imported rows outside this supported profile are rejected. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
 
 ## Example Usage
 
@@ -19,8 +19,8 @@ resource "zyxel_acl_rule" "https" {
   order                  = 10
   source_cidr            = "198.51.100.0/24"
   destination_cidr       = "192.0.2.10/32"
-  destination_port_start = 443
-  destination_port_end   = 443
+  source_ports           = "*"
+  destination_ports      = "443"
   packets_per_unit       = 100
   rate_limit_unit        = "minute"
 }
@@ -64,17 +64,20 @@ resource "zyxel_acl_rule" "restricted_client" {
 
 - `destination_port_end` (Number) Port from 1 through 65535; the range end must be at least the start. Set both bounds or omit both for any port. Ports are only used by the `tcp`, `udp`, and `tcp_udp` protocols. Changing it replaces the ACL rule.
 - `destination_port_start` (Number) Port from 1 through 65535; the range end must be at least the start. Set both bounds or omit both for any port. Ports are only used by the `tcp`, `udp`, and `tcp_udp` protocols. Changing it replaces the ACL rule.
+- `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with numeric destination port bounds and `service_id`. TCP/UDP protocols only. Changing it replaces the rule.
 - `direction` (String) Traffic direction: `wan_to_lan`, `lan_to_wan`, `wan_to_router`, or `lan_to_router`. Defaults to `wan_to_lan`. Changing it replaces the ACL rule.
 - `enabled` (Boolean) Whether the ACL rule is enabled. Defaults to `true`; changing it replaces the rule.
 - `ip_version` (String) Address family for `source_cidr` and `destination_cidr`: `ipv4` or `ipv6`. Defaults to `ipv4`. With `ipv6` you must set both CIDRs explicitly to IPv6 networks because the default source remains `0.0.0.0/0`. Changing it replaces the ACL rule.
 - `mac_address` (String) Optional source MAC address filter in canonical uppercase six-octet colon-separated form (for example, `AA:BB:CC:DD:EE:FF`). Omit for any MAC address. Changing it replaces the ACL rule.
 - `packets_per_unit` (Number) Optional packet rate limit: number of matching packets allowed per `rate_limit_unit`, from 1 through 512. Omit to disable rate limiting. Rate limiting requires `action = "accept"` and changing it replaces the ACL rule.
-- `protocol` (String) Transport protocol: `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`. `tcp_udp` is the router's TCP/UDP service. Defaults to `tcp`; changing it replaces the ACL rule.
+- `protocol` (String) Transport protocol: `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`. Defaults to `tcp` for inline rules. Omit when using `service_id`; the neutral `all` value is then computed and the service selects the protocol. Changing it replaces the ACL rule.
 - `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set. Changing it replaces the ACL rule.
 - `service` (String) Optional name of a custom protocol/service group on the router. Omit for none. The service must already exist; this resource does not create it. Changing it replaces the ACL rule.
+- `service_id` (String) Native custom service ID, for example `zyxel_service.https.id`. Mutually exclusive with `service` and inline protocol/port/TCP flag settings. Changing it replaces the rule.
 - `source_cidr` (String) Canonical source CIDR in the selected `ip_version`. Defaults to `0.0.0.0/0` (any IPv4 source). Use the canonical network address for the prefix; changing it replaces the rule.
 - `source_port_end` (Number) Optional source port range end. Set this together with `source_port_start`; changing it replaces the ACL rule.
 - `source_port_start` (Number) Optional source port range start for the `tcp`, `udp`, and `tcp_udp` protocols. Leave both source port bounds null for any source port; null maps to router values `-1/-1`.
+- `source_ports` (String) Source ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with numeric source port bounds and `service_id`. TCP/UDP protocols only. Changing it replaces the rule.
 - `tcp_flag` (String) Optional TCP flag to match: `syn`, `ack`, `urg`, `psh`, `rst`, or `fin`. Omit for any flag. Only valid with the `tcp` and `tcp_udp` protocols. Changing it replaces the ACL rule.
 
 ### Read-Only
