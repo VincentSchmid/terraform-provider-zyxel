@@ -29,6 +29,8 @@ type aclTestConfig struct {
 	name, action, source, destination string
 	order, destStart, destEnd         int
 	sourceStart, sourceEnd            int
+	packetsPerUnit                    int
+	rateLimitUnit                     string
 	enabled                           bool
 }
 
@@ -49,6 +51,10 @@ func (c aclTestConfig) hcl(endpoint string) string {
 	if !c.enabled {
 		enabled = "enabled = false"
 	}
+	packetsPerUnit := ""
+	if c.packetsPerUnit != 0 {
+		packetsPerUnit = fmt.Sprintf("packets_per_unit = %d\nrate_limit_unit = %q", c.packetsPerUnit, c.rateLimitUnit)
+	}
 	return fmt.Sprintf(`
 provider "zyxel" {
   host = %[1]q
@@ -65,8 +71,9 @@ resource "zyxel_acl_rule" "test" {
   destination_port_end = %[8]d
   %[9]s
   %[10]s
+  %[11]s
 }
-`, endpoint, c.name, c.action, c.order, sourceCIDR, c.destination, c.destStart, c.destEnd, enabled, sourcePorts)
+`, endpoint, c.name, c.action, c.order, sourceCIDR, c.destination, c.destStart, c.destEnd, enabled, sourcePorts, packetsPerUnit)
 }
 
 func TestAccACLRule_basicImportReplacement(t *testing.T) {
@@ -80,6 +87,8 @@ func TestAccACLRule_basicImportReplacement(t *testing.T) {
 		statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("source_port_start"), knownvalue.Null()),
 		statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("source_cidr"), knownvalue.StringExact("0.0.0.0/0")),
 		statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("enabled"), knownvalue.Bool(true)),
+		statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("packets_per_unit"), knownvalue.Null()),
+		statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("rate_limit_unit"), knownvalue.StringExact("minute")),
 		statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("router_index"), knownvalue.Int64Exact(2)),
 		aclFixtureStateCheck{fixture: f, name: c.name},
 	}}, {
@@ -97,9 +106,19 @@ func TestAccACLRule_basicImportReplacement(t *testing.T) {
 		func(c *aclTestConfig) { c.sourceStart = 2048 },
 		func(c *aclTestConfig) { c.enabled = false },
 		func(c *aclTestConfig) { c.name = "fixture-renamed" },
+		func(c *aclTestConfig) { c.action, c.packetsPerUnit, c.rateLimitUnit = "accept", 120, "minute" },
+		func(c *aclTestConfig) { c.packetsPerUnit, c.rateLimitUnit = 512, "second" },
+		func(c *aclTestConfig) { c.packetsPerUnit, c.rateLimitUnit = 0, "minute" },
 	}
 	for _, change := range changes {
 		change(&c)
+		packetsPerUnitCheck := statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("packets_per_unit"), knownvalue.Null())
+		unit := c.rateLimitUnit
+		if c.packetsPerUnit != 0 {
+			packetsPerUnitCheck = statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("packets_per_unit"), knownvalue.Int64Exact(int64(c.packetsPerUnit)))
+		} else if unit == "" {
+			unit = "minute"
+		}
 		steps = append(steps, resource.TestStep{
 			Config: c.hcl(f.server.URL),
 			ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
@@ -109,6 +128,8 @@ func TestAccACLRule_basicImportReplacement(t *testing.T) {
 				aclFixtureStateCheck{fixture: f, name: c.name},
 				statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("action"), knownvalue.StringExact(c.action)),
 				statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("enabled"), knownvalue.Bool(c.enabled)),
+				packetsPerUnitCheck,
+				statecheck.ExpectKnownValue(aclTestAddress, tfjsonpath.New("rate_limit_unit"), knownvalue.StringExact(unit)),
 			},
 		})
 	}

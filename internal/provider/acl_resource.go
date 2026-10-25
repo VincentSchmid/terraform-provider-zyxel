@@ -45,6 +45,8 @@ type aclRuleModel struct {
 	SourcePortStart      types.Int64  `tfsdk:"source_port_start"`
 	SourcePortEnd        types.Int64  `tfsdk:"source_port_end"`
 	Enabled              types.Bool   `tfsdk:"enabled"`
+	PacketsPerUnit       types.Int64  `tfsdk:"packets_per_unit"`
+	RateLimitUnit        types.String `tfsdk:"rate_limit_unit"`
 	RouterIndex          types.Int64  `tfsdk:"router_index"`
 }
 
@@ -58,7 +60,7 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	replaceBool := []planmodifier.Bool{boolplanmodifier.RequiresReplace()}
 	portDescription := "TCP port from 1 through 65535; the range end must be at least the start. Changing it replaces the ACL rule."
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages one firewall ACL entry in the router's `firewall_acl` table, limited to the supported IPv4/TCP/`WAN_TO_LAN` profile with interface `ALL`, custom service index `0`, no schedule, and no MAC or IPv6 filters. Existing rows must be imported by exact name; imported rows outside this fixed profile are rejected. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.",
+		MarkdownDescription: "Manages one firewall ACL entry in the router's `firewall_acl` table, limited to the supported IPv4/TCP/`WAN_TO_LAN` profile with interface `ALL`, custom service index `0`, no schedule, and no MAC or IPv6 filters. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name; imported rows outside this fixed profile are rejected. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.",
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required: true, MarkdownDescription: "Exact, non-empty router rule name. This is the natural identity and import key; duplicate names are ambiguous.",
@@ -101,6 +103,16 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional: true, Computed: true, Default: booldefault.StaticBool(true),
 				MarkdownDescription: "Whether the ACL rule is enabled. Defaults to `true`; changing it replaces the rule.", PlanModifiers: replaceBool,
 			},
+			"packets_per_unit": schema.Int64Attribute{
+				Optional:            true,
+				MarkdownDescription: "Optional packet rate limit: number of matching packets allowed per `rate_limit_unit`, from 1 through 512. Omit to disable rate limiting. Rate limiting requires `action = \"accept\"` and changing it replaces the ACL rule.",
+				PlanModifiers:       replaceInt, Validators: []validator.Int64{aclInt64Validator{minimum: 1, maximum: 512}},
+			},
+			"rate_limit_unit": schema.StringAttribute{
+				Optional: true, Computed: true, Default: stringdefault.StaticString("minute"),
+				MarkdownDescription: "Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set. Changing it replaces the ACL rule.",
+				PlanModifiers:       replaceString, Validators: []validator.String{aclRateLimitUnitValidator{}},
+			},
 			"router_index": schema.Int64Attribute{
 				Computed: true, MarkdownDescription: "Current router list index, exposed for diagnostics only. Indexes shift after deletes and are never used as resource identity.",
 			},
@@ -132,6 +144,15 @@ func (r *ACLRuleResource) ValidateConfig(ctx context.Context, req resource.Valid
 		resp.Diagnostics.AddAttributeError(path.Root("source_port_end"), "Incomplete source port range", "Set both `source_port_start` and `source_port_end`, or leave both null for any source port.")
 	} else if !config.SourcePortStart.IsNull() && config.SourcePortEnd.ValueInt64() < config.SourcePortStart.ValueInt64() {
 		resp.Diagnostics.AddAttributeError(path.Root("source_port_end"), "Invalid source port range", "source_port_end must be greater than or equal to source_port_start.")
+	}
+	if !config.PacketsPerUnit.IsUnknown() {
+		if config.PacketsPerUnit.IsNull() {
+			if !config.RateLimitUnit.IsUnknown() && !config.RateLimitUnit.IsNull() && config.RateLimitUnit.ValueString() != "minute" {
+				resp.Diagnostics.AddAttributeError(path.Root("rate_limit_unit"), "Rate limit unit without a packet limit", "Set `packets_per_unit` when using `rate_limit_unit`; omit the unit or leave it as `minute` when rate limiting is disabled.")
+			}
+		} else if !config.Action.IsUnknown() && !config.Action.IsNull() && config.Action.ValueString() != "accept" {
+			resp.Diagnostics.AddAttributeError(path.Root("packets_per_unit"), "Rate limit requires accept", "The router only supports rate limiting for `action = \"accept\"`; remove `packets_per_unit` or change the action.")
+		}
 	}
 	if config.DestinationPortStart.IsUnknown() || config.DestinationPortEnd.IsUnknown() || config.DestinationPortStart.IsNull() || config.DestinationPortEnd.IsNull() {
 		return
@@ -180,7 +201,7 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 
 func unknownACLPlanAttributes(model aclRuleModel) []string {
 	var unknown []string
-	for name, value := range map[string]types.String{"name": model.Name, "action": model.Action, "source_cidr": model.SourceCIDR, "destination_cidr": model.DestinationCIDR} {
+	for name, value := range map[string]types.String{"name": model.Name, "action": model.Action, "source_cidr": model.SourceCIDR, "destination_cidr": model.DestinationCIDR, "rate_limit_unit": model.RateLimitUnit} {
 		if value.IsUnknown() {
 			unknown = append(unknown, name)
 		}
@@ -188,7 +209,7 @@ func unknownACLPlanAttributes(model aclRuleModel) []string {
 	for name, value := range map[string]types.Int64{
 		"order": model.Order, "destination_port_start": model.DestinationPortStart,
 		"destination_port_end": model.DestinationPortEnd, "source_port_start": model.SourcePortStart,
-		"source_port_end": model.SourcePortEnd,
+		"source_port_end": model.SourcePortEnd, "packets_per_unit": model.PacketsPerUnit,
 	} {
 		if value.IsUnknown() {
 			unknown = append(unknown, name)
@@ -261,11 +282,21 @@ func modelACLRule(model aclRuleModel) zyxel.ACLRule {
 		value := model.SourcePortEnd.ValueInt64()
 		sourceEnd = &value
 	}
+	var packetsPerUnit *int64
+	if !model.PacketsPerUnit.IsNull() && !model.PacketsPerUnit.IsUnknown() {
+		value := model.PacketsPerUnit.ValueInt64()
+		packetsPerUnit = &value
+	}
+	rateLimitUnit := "minute"
+	if !model.RateLimitUnit.IsNull() && !model.RateLimitUnit.IsUnknown() {
+		rateLimitUnit = model.RateLimitUnit.ValueString()
+	}
 	return zyxel.ACLRule{
 		Name: model.Name.ValueString(), Action: model.Action.ValueString(), Order: model.Order.ValueInt64(),
 		SourceCIDR: model.SourceCIDR.ValueString(), DestinationCIDR: model.DestinationCIDR.ValueString(),
 		DestinationPortStart: model.DestinationPortStart.ValueInt64(), DestinationPortEnd: model.DestinationPortEnd.ValueInt64(),
 		SourcePortStart: sourceStart, SourcePortEnd: sourceEnd, Enabled: model.Enabled.ValueBool(),
+		RateLimit: packetsPerUnit, RateLimitUnit: rateLimitUnit,
 	}
 }
 
@@ -276,12 +307,19 @@ func modelFromACLRule(rule zyxel.ACLRule) aclRuleModel {
 		DestinationPortStart: types.Int64Value(rule.DestinationPortStart), DestinationPortEnd: types.Int64Value(rule.DestinationPortEnd),
 		Enabled: types.BoolValue(rule.Enabled), RouterIndex: types.Int64Value(rule.RouterIndex),
 		SourcePortStart: types.Int64Null(), SourcePortEnd: types.Int64Null(),
+		PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringValue("minute"),
 	}
 	if rule.SourcePortStart != nil {
 		model.SourcePortStart = types.Int64Value(*rule.SourcePortStart)
 	}
 	if rule.SourcePortEnd != nil {
 		model.SourcePortEnd = types.Int64Value(*rule.SourcePortEnd)
+	}
+	if rule.RateLimit != nil {
+		model.PacketsPerUnit = types.Int64Value(*rule.RateLimit)
+	}
+	if rule.RateLimitUnit != "" {
+		model.RateLimitUnit = types.StringValue(rule.RateLimitUnit)
 	}
 	return model
 }
@@ -315,6 +353,23 @@ func (aclActionValidator) ValidateString(_ context.Context, req validator.String
 	}
 	if req.ConfigValue.ValueString() != "accept" && req.ConfigValue.ValueString() != "drop" {
 		resp.Diagnostics.AddAttributeError(req.Path, "Invalid ACL action", "action must be `accept` or `drop`.")
+	}
+}
+
+type aclRateLimitUnitValidator struct{}
+
+func (aclRateLimitUnitValidator) Description(context.Context) string {
+	return "must be `minute` or `second`"
+}
+func (aclRateLimitUnitValidator) MarkdownDescription(ctx context.Context) string {
+	return aclRateLimitUnitValidator{}.Description(ctx)
+}
+func (aclRateLimitUnitValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if req.ConfigValue.ValueString() != "minute" && req.ConfigValue.ValueString() != "second" {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid rate limit unit", "rate_limit_unit must be `minute` or `second`.")
 	}
 }
 

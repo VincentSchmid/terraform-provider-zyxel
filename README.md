@@ -95,7 +95,7 @@ several Terraform processes against the router at the same time.
 | `zyxel_cloudflare_ipv4_ranges` | data source | Fetches Cloudflare's IPv4 list for firewall rules |
 | `zyxel_dhcp_reservation` | resource | Enabled static DHCP reservation by MAC address |
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
-| `zyxel_acl_rule` | resource | IPv4 TCP WAN-to-LAN firewall ACL entry |
+| `zyxel_acl_rule` | resource | IPv4 TCP WAN-to-LAN firewall ACL entry with optional packet rate limit |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
 
 Full documentation is on the

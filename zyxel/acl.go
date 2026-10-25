@@ -27,6 +27,8 @@ type ACLRule struct {
 	SourcePortStart      *int64
 	SourcePortEnd        *int64
 	Enabled              bool
+	RateLimit            *int64
+	RateLimitUnit        string
 	RouterIndex          int64
 }
 
@@ -245,7 +247,22 @@ func (r ACLRule) dalPayload() (map[string]any, error) {
 			return nil, errors.New("ACL source port range is invalid")
 		}
 	}
-	return map[string]any{
+	rateLimitUnit := r.RateLimitUnit
+	if rateLimitUnit == "" {
+		rateLimitUnit = "minute"
+	}
+	if r.RateLimit != nil {
+		if target != "Accept" {
+			return nil, errors.New("ACL rate limiting requires the accept action")
+		}
+		if *r.RateLimit < 1 || *r.RateLimit > 512 {
+			return nil, errors.New("ACL rate limit must be between 1 and 512 packets per unit")
+		}
+		if rateLimitUnit != "minute" && rateLimitUnit != "second" {
+			return nil, errors.New("ACL rate limit unit must be minute or second")
+		}
+	}
+	payload := map[string]any{
 		"Enable": r.Enabled, "Name": r.Name, "Interface": "ALL", "Order": r.Order,
 		"Target": target, "IPVersion": "IPv4", "SourceIP": sourceIP, "SourceMask": sourceMask,
 		"MACAddress": "AnyMACAddress", "DestIP": destinationIP, "DestMask": destinationMask,
@@ -253,7 +270,12 @@ func (r ACLRule) dalPayload() (map[string]any, error) {
 		"Protocol": "TCP", "SourcePort": sourceStart, "SourcePortRangeMax": sourceEnd,
 		"DestPort": r.DestinationPortStart, "DestPortRangeMax": r.DestinationPortEnd,
 		"IPv6header": "", "IPv6headertypes": "",
-	}, nil
+	}
+	if r.RateLimit != nil {
+		payload["LimitRate"] = *r.RateLimit
+		payload["LimitRateUnit"] = rateLimitUnit
+	}
+	return payload, nil
 }
 
 func parseACLRule(row map[string]any) (ACLRule, error) {
@@ -315,6 +337,36 @@ func parseACLRule(row map[string]any) (ACLRule, error) {
 	rule.Enabled, ok = aclBool(row["Enable"])
 	if !ok {
 		return rule, errors.New("ACL row has an invalid enabled flag")
+	}
+	rule.RateLimitUnit = "minute"
+	if value, exists := row["LimitRate"]; exists && value != nil {
+		if text, textOK := aclString(value); textOK && strings.TrimSpace(text) == "" {
+			// The UI omits the field when rate limiting is disabled; some
+			// firmware builds may store an empty string instead.
+		} else {
+			rateLimit, rateOK := aclInt64(value)
+			if !rateOK || rateLimit < 0 || rateLimit > 512 {
+				return rule, errors.New("ACL row has an invalid rate limit")
+			}
+			if rateLimit > 0 {
+				rule.RateLimit = &rateLimit
+			}
+		}
+	}
+	if rule.RateLimit != nil {
+		if rule.Action != "accept" {
+			return rule, errors.New("ACL row uses an unsupported rate limit for its action")
+		}
+		if value, exists := row["LimitRateUnit"]; exists && value != nil {
+			unit, unitOK := aclString(value)
+			unit = strings.ToLower(strings.TrimSpace(unit))
+			if !unitOK || (unit != "" && unit != "minute" && unit != "second") {
+				return rule, errors.New("ACL row has an invalid rate limit unit")
+			}
+			if unit != "" {
+				rule.RateLimitUnit = unit
+			}
+		}
 	}
 	if err := validateACLProfile(row); err != nil {
 		return rule, err
@@ -391,6 +443,19 @@ func aclRuleDifferences(want, got ACLRule) []string {
 	}
 	if want.Enabled != got.Enabled {
 		differences = append(differences, "enabled")
+	}
+	if !sameInt64Pointer(want.RateLimit, got.RateLimit) {
+		differences = append(differences, "rate_limit")
+	}
+	wantUnit, gotUnit := want.RateLimitUnit, got.RateLimitUnit
+	if wantUnit == "" {
+		wantUnit = "minute"
+	}
+	if gotUnit == "" {
+		gotUnit = "minute"
+	}
+	if wantUnit != gotUnit {
+		differences = append(differences, "rate_limit_unit")
 	}
 	return differences
 }

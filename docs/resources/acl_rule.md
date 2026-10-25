@@ -3,12 +3,12 @@
 page_title: "zyxel_acl_rule Resource - zyxel"
 subcategory: ""
 description: |-
-  Manages one IPv4 TCP WAN-to-LAN firewall ACL entry using the router's firewall_acl table. Existing rows must be imported by exact name. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
+  Manages one IPv4 TCP WAN-to-LAN firewall ACL entry using the router's firewall_acl table. Existing rows must be imported by exact name. Optional packet rate limiting is supported for accept rules. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
 ---
 
 # zyxel_acl_rule (Resource)
 
-Manages one IPv4 TCP WAN-to-LAN firewall ACL entry using the router's `firewall_acl` table. Existing rows must be imported by exact name. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
+Manages one IPv4 TCP WAN-to-LAN firewall ACL entry using the router's `firewall_acl` table. Existing rows must be imported by exact name. Optional packet rate limiting is supported for `accept` rules. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
 
 ## Example Usage
 
@@ -21,6 +21,8 @@ resource "zyxel_acl_rule" "https" {
   destination_cidr       = "192.0.2.10/32"
   destination_port_start = 443
   destination_port_end   = 443
+  packets_per_unit       = 100
+  rate_limit_unit        = "minute"
 }
 ```
 
@@ -39,6 +41,8 @@ resource "zyxel_acl_rule" "https" {
 ### Optional
 
 - `enabled` (Boolean) Whether the ACL rule is enabled. Defaults to `true`; changing it replaces the rule.
+- `packets_per_unit` (Number) Optional packet rate limit: number of matching packets allowed per `rate_limit_unit`, from 1 through 512. Omit to disable rate limiting. Rate limiting requires `action = "accept"` and changing it replaces the ACL rule.
+- `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set. Changing it replaces the ACL rule.
 - `source_cidr` (String) IPv4 source CIDR. Defaults to `0.0.0.0/0` (any source). Use the canonical network address for the prefix; changing it replaces the rule.
 - `source_port_end` (Number) Optional TCP source port range end. Set this together with `source_port_start`; changing it replaces the ACL rule.
 - `source_port_start` (Number) Optional TCP source port range start. Leave both source port bounds null for any source port; null maps to router values `-1/-1`.
