@@ -161,7 +161,7 @@ for the current schema, lifecycle, and import example.
 
 The implemented scope is IPv4, TCP, WAN-to-LAN, all interfaces, custom service
 index `0`, no schedule or MAC filter, and empty IPv6 filter fields. Optional
-packet rate limiting is supported for `accept` rules through `rate_limit`
+packet rate limiting is supported for `accept` rules through `packets_per_unit`
 (1–512 packets) and `rate_limit_unit` (`minute` or `second`). Other protocols,
 directions, interfaces, schedules, and service profiles remain outside this
 initial resource. Unrelated ACL entries remain untouched.

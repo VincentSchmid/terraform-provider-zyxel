@@ -45,7 +45,7 @@ type aclRuleModel struct {
 	SourcePortStart      types.Int64  `tfsdk:"source_port_start"`
 	SourcePortEnd        types.Int64  `tfsdk:"source_port_end"`
 	Enabled              types.Bool   `tfsdk:"enabled"`
-	RateLimit            types.Int64  `tfsdk:"rate_limit"`
+	PacketsPerUnit       types.Int64  `tfsdk:"packets_per_unit"`
 	RateLimitUnit        types.String `tfsdk:"rate_limit_unit"`
 	RouterIndex          types.Int64  `tfsdk:"router_index"`
 }
@@ -103,14 +103,14 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Optional: true, Computed: true, Default: booldefault.StaticBool(true),
 				MarkdownDescription: "Whether the ACL rule is enabled. Defaults to `true`; changing it replaces the rule.", PlanModifiers: replaceBool,
 			},
-			"rate_limit": schema.Int64Attribute{
+			"packets_per_unit": schema.Int64Attribute{
 				Optional:            true,
-				MarkdownDescription: "Optional packet rate limit from 1 through 512 packets per `rate_limit_unit`. Omit to disable rate limiting. Rate limiting requires `action = \"accept\"` and changing it replaces the ACL rule.",
+				MarkdownDescription: "Optional packet rate limit: number of matching packets allowed per `rate_limit_unit`, from 1 through 512. Omit to disable rate limiting. Rate limiting requires `action = \"accept\"` and changing it replaces the ACL rule.",
 				PlanModifiers:       replaceInt, Validators: []validator.Int64{aclInt64Validator{minimum: 1, maximum: 512}},
 			},
 			"rate_limit_unit": schema.StringAttribute{
 				Optional: true, Computed: true, Default: stringdefault.StaticString("minute"),
-				MarkdownDescription: "Period for `rate_limit`: `minute` or `second`. Defaults to `minute`; only used when `rate_limit` is set. Changing it replaces the ACL rule.",
+				MarkdownDescription: "Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set. Changing it replaces the ACL rule.",
 				PlanModifiers:       replaceString, Validators: []validator.String{aclRateLimitUnitValidator{}},
 			},
 			"router_index": schema.Int64Attribute{
@@ -145,13 +145,13 @@ func (r *ACLRuleResource) ValidateConfig(ctx context.Context, req resource.Valid
 	} else if !config.SourcePortStart.IsNull() && config.SourcePortEnd.ValueInt64() < config.SourcePortStart.ValueInt64() {
 		resp.Diagnostics.AddAttributeError(path.Root("source_port_end"), "Invalid source port range", "source_port_end must be greater than or equal to source_port_start.")
 	}
-	if !config.RateLimit.IsUnknown() {
-		if config.RateLimit.IsNull() {
+	if !config.PacketsPerUnit.IsUnknown() {
+		if config.PacketsPerUnit.IsNull() {
 			if !config.RateLimitUnit.IsUnknown() && !config.RateLimitUnit.IsNull() && config.RateLimitUnit.ValueString() != "minute" {
-				resp.Diagnostics.AddAttributeError(path.Root("rate_limit_unit"), "Rate limit unit without a rate limit", "Set `rate_limit` when using `rate_limit_unit`; omit the unit or leave it as `minute` when rate limiting is disabled.")
+				resp.Diagnostics.AddAttributeError(path.Root("rate_limit_unit"), "Rate limit unit without a packet limit", "Set `packets_per_unit` when using `rate_limit_unit`; omit the unit or leave it as `minute` when rate limiting is disabled.")
 			}
 		} else if !config.Action.IsUnknown() && !config.Action.IsNull() && config.Action.ValueString() != "accept" {
-			resp.Diagnostics.AddAttributeError(path.Root("rate_limit"), "Rate limit requires accept", "The router only supports rate limiting for `action = \"accept\"`; remove `rate_limit` or change the action.")
+			resp.Diagnostics.AddAttributeError(path.Root("packets_per_unit"), "Rate limit requires accept", "The router only supports rate limiting for `action = \"accept\"`; remove `packets_per_unit` or change the action.")
 		}
 	}
 	if config.DestinationPortStart.IsUnknown() || config.DestinationPortEnd.IsUnknown() || config.DestinationPortStart.IsNull() || config.DestinationPortEnd.IsNull() {
@@ -209,7 +209,7 @@ func unknownACLPlanAttributes(model aclRuleModel) []string {
 	for name, value := range map[string]types.Int64{
 		"order": model.Order, "destination_port_start": model.DestinationPortStart,
 		"destination_port_end": model.DestinationPortEnd, "source_port_start": model.SourcePortStart,
-		"source_port_end": model.SourcePortEnd, "rate_limit": model.RateLimit,
+		"source_port_end": model.SourcePortEnd, "packets_per_unit": model.PacketsPerUnit,
 	} {
 		if value.IsUnknown() {
 			unknown = append(unknown, name)
@@ -282,10 +282,10 @@ func modelACLRule(model aclRuleModel) zyxel.ACLRule {
 		value := model.SourcePortEnd.ValueInt64()
 		sourceEnd = &value
 	}
-	var rateLimit *int64
-	if !model.RateLimit.IsNull() && !model.RateLimit.IsUnknown() {
-		value := model.RateLimit.ValueInt64()
-		rateLimit = &value
+	var packetsPerUnit *int64
+	if !model.PacketsPerUnit.IsNull() && !model.PacketsPerUnit.IsUnknown() {
+		value := model.PacketsPerUnit.ValueInt64()
+		packetsPerUnit = &value
 	}
 	rateLimitUnit := "minute"
 	if !model.RateLimitUnit.IsNull() && !model.RateLimitUnit.IsUnknown() {
@@ -296,7 +296,7 @@ func modelACLRule(model aclRuleModel) zyxel.ACLRule {
 		SourceCIDR: model.SourceCIDR.ValueString(), DestinationCIDR: model.DestinationCIDR.ValueString(),
 		DestinationPortStart: model.DestinationPortStart.ValueInt64(), DestinationPortEnd: model.DestinationPortEnd.ValueInt64(),
 		SourcePortStart: sourceStart, SourcePortEnd: sourceEnd, Enabled: model.Enabled.ValueBool(),
-		RateLimit: rateLimit, RateLimitUnit: rateLimitUnit,
+		RateLimit: packetsPerUnit, RateLimitUnit: rateLimitUnit,
 	}
 }
 
@@ -307,7 +307,7 @@ func modelFromACLRule(rule zyxel.ACLRule) aclRuleModel {
 		DestinationPortStart: types.Int64Value(rule.DestinationPortStart), DestinationPortEnd: types.Int64Value(rule.DestinationPortEnd),
 		Enabled: types.BoolValue(rule.Enabled), RouterIndex: types.Int64Value(rule.RouterIndex),
 		SourcePortStart: types.Int64Null(), SourcePortEnd: types.Int64Null(),
-		RateLimit: types.Int64Null(), RateLimitUnit: types.StringValue("minute"),
+		PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringValue("minute"),
 	}
 	if rule.SourcePortStart != nil {
 		model.SourcePortStart = types.Int64Value(*rule.SourcePortStart)
@@ -316,7 +316,7 @@ func modelFromACLRule(rule zyxel.ACLRule) aclRuleModel {
 		model.SourcePortEnd = types.Int64Value(*rule.SourcePortEnd)
 	}
 	if rule.RateLimit != nil {
-		model.RateLimit = types.Int64Value(*rule.RateLimit)
+		model.PacketsPerUnit = types.Int64Value(*rule.RateLimit)
 	}
 	if rule.RateLimitUnit != "" {
 		model.RateLimitUnit = types.StringValue(rule.RateLimitUnit)
