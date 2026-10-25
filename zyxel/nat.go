@@ -26,6 +26,19 @@ type NATRule struct {
 	Enabled           bool
 }
 
+// ParseNATPorts accepts a single port or an inclusive range. NAT requires
+// explicit ports; unlike ACL and service ports, wildcards are not supported.
+func ParseNATPorts(value string) (int64, int64, error) {
+	start, end, err := ParsePorts(value)
+	if err != nil {
+		return 0, 0, err
+	}
+	if start == nil {
+		return 0, 0, errors.New("NAT ports must be a port or start-end, not empty or *")
+	}
+	return *start, *end, nil
+}
+
 // ReadNATRule resolves an exact name and rejects duplicate identities.
 // A nil rule with no error means the rule is absent.
 func (c *Client) ReadNATRule(ctx context.Context, name string) (*NATRule, error) {

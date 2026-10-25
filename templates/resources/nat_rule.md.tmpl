@@ -21,8 +21,29 @@ Replacing an imported rule does not preserve interface selection or other
 settings outside this resource's schema. `protocol` accepts `tcp`,
 `udp`, `both`, or `all`, which map to `TCP`, `UDP`, `TCP+UDP`, and `ALL` on
 the router. `all` forwards every protocol, so it is broader than `both`.
-Specify both bounds even for a single port. Internal and external ranges
-must have the same length.
+Use `external_ports` and `translation_ports` strings: `"5006"` is a single
+port (equal start and end), and `"5006-5007"` is an inclusive range. Wildcards,
+empty values, and port lists are not supported. Both ranges must have the same
+length. An equal-bound range such as `"5006-5006"` is also accepted.
+
+## Upgrading to v2.0.0
+
+This is a breaking configuration change. Replace `external_port_start` and
+`external_port_end` with `external_ports`, and replace `internal_port_start`
+and `internal_port_end` with `translation_ports`. Remove all four old arguments;
+they are no longer accepted. `internal_client`, rule names and resource
+addresses are unchanged.
+
+```terraform
+external_ports    = "5006-5007"
+translation_ports = "5006-5007"
+```
+
+Existing version-0 resource state is upgraded automatically, without router
+writes or re-imports. Keep equivalent port values during migration to avoid
+replacement. A real port change still replaces the rule; review the plan before
+applying. Back up state through your backend before upgrading; do not downgrade
+to a v1 provider after state has been upgraded.
 
 ## Identity and changes
 

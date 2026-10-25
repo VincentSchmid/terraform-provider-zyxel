@@ -13,13 +13,11 @@ Manages one supported router NAT rule. The router has no verified in-place updat
 
 ```terraform
 resource "zyxel_nat_rule" "https" {
-  name                = "HTTPS-to-server"
-  protocol            = "tcp"
-  external_port_start = 443
-  external_port_end   = 443
-  internal_client     = "192.168.1.20"
-  internal_port_start = 443
-  internal_port_end   = 443
+  name              = "HTTPS-to-server"
+  protocol          = "tcp"
+  external_ports    = "443"
+  internal_client   = "192.168.1.20"
+  translation_ports = "443"
 }
 ```
 
@@ -31,8 +29,29 @@ Replacing an imported rule does not preserve interface selection or other
 settings outside this resource's schema. `protocol` accepts `tcp`,
 `udp`, `both`, or `all`, which map to `TCP`, `UDP`, `TCP+UDP`, and `ALL` on
 the router. `all` forwards every protocol, so it is broader than `both`.
-Specify both bounds even for a single port. Internal and external ranges
-must have the same length.
+Use `external_ports` and `translation_ports` strings: `"5006"` is a single
+port (equal start and end), and `"5006-5007"` is an inclusive range. Wildcards,
+empty values, and port lists are not supported. Both ranges must have the same
+length. An equal-bound range such as `"5006-5006"` is also accepted.
+
+## Upgrading to v2.0.0
+
+This is a breaking configuration change. Replace `external_port_start` and
+`external_port_end` with `external_ports`, and replace `internal_port_start`
+and `internal_port_end` with `translation_ports`. Remove all four old arguments;
+they are no longer accepted. `internal_client`, rule names and resource
+addresses are unchanged.
+
+```terraform
+external_ports    = "5006-5007"
+translation_ports = "5006-5007"
+```
+
+Existing version-0 resource state is upgraded automatically, without router
+writes or re-imports. Keep equivalent port values during migration to avoid
+replacement. A real port change still replaces the rule; review the plan before
+applying. Back up state through your backend before upgrading; do not downgrade
+to a v1 provider after state has been upgraded.
 
 ## Identity and changes
 
@@ -63,13 +82,11 @@ NAT creation and deletion have not been verified on hardware.
 
 ### Required
 
-- `external_port_end` (Number) Last external port, from 1 through 65535, inclusive. Must be greater than or equal to the start port.
-- `external_port_start` (Number) First external port, from 1 through 65535. External and internal ranges must have equal lengths.
+- `external_ports` (String) External port or inclusive range, such as `5006` or `5006-5007`. Ports must be canonical decimal numbers from 1 through 65535; wildcards are not supported. Must contain the same number of ports as `translation_ports`.
 - `internal_client` (String) IPv4 address of the destination host.
-- `internal_port_end` (Number) Last internal port, from 1 through 65535, inclusive. Must be greater than or equal to the start port.
-- `internal_port_start` (Number) First internal port, from 1 through 65535. External and internal ranges must have equal lengths.
 - `name` (String) Exact, nonempty router description. This is the natural identity and import key; leading and trailing whitespace are not allowed.
 - `protocol` (String) Transport protocol: `tcp`, `udp`, `both`, or `all`. The router stores these as `TCP`, `UDP`, `TCP+UDP`, or `ALL`; `all` forwards every protocol, which is not the same as `both`.
+- `translation_ports` (String) Destination port or inclusive range, such as `5006` or `5006-5007`. Ports must be canonical decimal numbers from 1 through 65535; wildcards are not supported. Must contain the same number of ports as `external_ports`.
 
 ### Read-Only
 

@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	testresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -32,6 +34,7 @@ func defaultNATTestConfig() natTestConfig {
 }
 
 func (c natTestConfig) hcl(endpoint string) string {
+	extStart, extEnd, intStart, intEnd := int64(c.extStart), int64(c.extEnd), int64(c.intStart), int64(c.intEnd)
 	return fmt.Sprintf(`
 provider "zyxel" {
   host = %[1]q
@@ -41,13 +44,11 @@ provider "zyxel" {
 resource "zyxel_nat_rule" "test" {
   name = %[2]q
   protocol = %[3]q
-  external_port_start = %[4]d
-  external_port_end = %[5]d
-  internal_client = %[6]q
-  internal_port_start = %[7]d
-  internal_port_end = %[8]d
+  external_ports = %[4]q
+  internal_client = %[5]q
+  translation_ports = %[6]q
 }
-`, endpoint, c.name, c.protocol, c.extStart, c.extEnd, c.internalClient, c.intStart, c.intEnd)
+`, endpoint, c.name, c.protocol, zyxel.FormatPorts(&extStart, &extEnd), c.internalClient, zyxel.FormatPorts(&intStart, &intEnd))
 }
 
 func TestAccNATRule_basicImportReplacement(t *testing.T) {
@@ -72,11 +73,22 @@ func TestAccNATRule_basicImportReplacement(t *testing.T) {
 			plancheck.ExpectResourceAction(natTestAddress, plancheck.ResourceActionDestroyBeforeCreate),
 		}},
 		ConfigStateChecks: []statecheck.StateCheck{
-			statecheck.ExpectKnownValue(natTestAddress, tfjsonpath.New("external_port_start"), knownvalue.Int64Exact(8081)),
+			statecheck.ExpectKnownValue(natTestAddress, tfjsonpath.New("external_ports"), knownvalue.StringExact("8081")),
 			natFixtureStateCheck{fixture: fixture, name: c.name},
 		},
 	})
 	steps = append(steps, testresource.TestStep{ResourceName: natTestAddress, ImportState: true, ImportStateVerify: true, ImportStateId: c.name, ImportStateVerifyIdentifierAttribute: "name"})
+	c.extEnd, c.intEnd = 8082, 81
+	steps = append(steps, testresource.TestStep{
+		Config: c.hcl(fixture.endpoint),
+		ConfigPlanChecks: testresource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+			plancheck.ExpectResourceAction(natTestAddress, plancheck.ResourceActionDestroyBeforeCreate),
+		}},
+		ConfigStateChecks: []statecheck.StateCheck{
+			statecheck.ExpectKnownValue(natTestAddress, tfjsonpath.New("external_ports"), knownvalue.StringExact("8081-8082")),
+			statecheck.ExpectKnownValue(natTestAddress, tfjsonpath.New("translation_ports"), knownvalue.StringExact("80-81")),
+		},
+	}, testresource.TestStep{ResourceName: natTestAddress, ImportState: true, ImportStateVerify: true, ImportStateId: c.name, ImportStateVerifyIdentifierAttribute: "name"})
 	testresource.Test(t, testresource.TestCase{
 		ProtoV6ProviderFactories: natTestFactories,
 		Steps:                    steps,

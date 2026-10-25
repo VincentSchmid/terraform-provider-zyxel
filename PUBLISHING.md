@@ -8,6 +8,13 @@ releases are ingested automatically; the one-time registry setup is complete.
 
 ## Releasing a version
 
+The next NAT schema release is **v2.0.0**: `external_ports` and
+`translation_ports` replace the four numeric port-bound arguments. This is a
+breaking configuration change from v1.0.0. Existing resource state is upgraded
+automatically; see the NAT resource's upgrade notes. Publish a new immutable
+major tag only after the implementation and generated documentation are merged
+and all tests pass. Do not publish this change under a v1 tag.
+
 1. Make sure `main` builds, tests pass, and the docs are regenerated.
 2. Choose a new, unused semantic version, then tag the release commit and push it.
    For example, for the next patch release:

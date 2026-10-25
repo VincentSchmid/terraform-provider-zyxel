@@ -155,9 +155,9 @@ func TestNATResourceCreateKeepsKnownStateAfterAmbiguousPOST(t *testing.T) {
 	plan := tfsdk.Plan{Schema: schemaResponse.Schema}
 	planned := natRuleModel{
 		Name: types.StringValue("recoverable"), Protocol: types.StringValue("tcp"),
-		ExternalPortStart: types.Int64Value(8080), ExternalPortEnd: types.Int64Value(8080),
-		InternalClient: types.StringValue("192.0.2.80"), InternalPortStart: types.Int64Value(80),
-		InternalPortEnd: types.Int64Value(80), Enabled: types.BoolUnknown(), RouterIndex: types.Int64Unknown(),
+		ExternalPorts:  types.StringValue("8080"),
+		InternalClient: types.StringValue("192.0.2.80"), TranslationPorts: types.StringValue("80"),
+		Enabled: types.BoolUnknown(), RouterIndex: types.Int64Unknown(),
 	}
 	if diags := plan.Set(ctx, &planned); diags.HasError() {
 		t.Fatal(diags)

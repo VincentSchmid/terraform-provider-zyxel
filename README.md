@@ -43,7 +43,7 @@ terraform {
   required_providers {
     zyxel = {
       source  = "VincentSchmid/zyxel"
-      version = "~> 0.1"
+      version = "~> 2.0"
     }
   }
 }
@@ -118,13 +118,11 @@ resource "zyxel_firewall" "router" {
 }
 
 resource "zyxel_nat_rule" "https" {
-  name                = "HTTPS"
-  protocol            = "tcp"
-  external_port_start = 443
-  external_port_end   = 443
-  internal_client     = "192.168.1.240"
-  internal_port_start = 443
-  internal_port_end   = 443
+  name              = "HTTPS"
+  protocol          = "tcp"
+  external_ports    = "443"
+  internal_client   = "192.168.1.240"
+  translation_ports = "443"
 }
 
 resource "zyxel_dhcp_reservation" "nas" {
