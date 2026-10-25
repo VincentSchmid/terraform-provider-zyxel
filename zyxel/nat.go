@@ -1,4 +1,4 @@
-package provider
+package zyxel
 
 import (
 	"context"
@@ -26,6 +26,16 @@ type NATRule struct {
 	Enabled           bool
 }
 
+// ReadNATRule resolves an exact name and rejects duplicate identities.
+// A nil rule with no error means the rule is absent.
+func (c *Client) ReadNATRule(ctx context.Context, name string) (*NATRule, error) {
+	rows, err := c.NATRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return findNATRule(rows, name)
+}
+
 func (c *Client) NATRules(ctx context.Context) ([]NATRule, error) {
 	var rules []NATRule
 	err := c.withSession(ctx, func(s *routerSession) error {
@@ -36,6 +46,9 @@ func (c *Client) NATRules(ctx context.Context) ([]NATRule, error) {
 	return rules, err
 }
 
+// CreateNATRule creates an enabled rule after checking names and port conflicts.
+// The boolean is true if creation succeeded or may have succeeded, including
+// when an error prevents confirmation. Reconcile by name before retrying.
 func (c *Client) CreateNATRule(ctx context.Context, rule NATRule) (bool, error) {
 	if err := validateNATRuleInput(rule); err != nil {
 		return false, err
@@ -61,7 +74,7 @@ func (c *Client) CreateNATRule(ctx context.Context, rule NATRule) (bool, error) 
 			"InternalPortEnd": rule.InternalPortEnd,
 		})
 		if err != nil {
-			var ambiguous *ambiguousWriteError
+			var ambiguous *AmbiguousWriteError
 			if errors.As(err, &ambiguous) {
 				created = true
 			}

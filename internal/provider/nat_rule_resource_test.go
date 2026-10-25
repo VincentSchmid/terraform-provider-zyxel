@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/internal/routertest"
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -25,7 +28,7 @@ func TestNATRuleCreateDeleteUsesCurrentIndexesAndRotatedSession(t *testing.T) {
 	rows := []map[string]any{natRow(3, "older", "UDP", 4000, 4000, "192.0.2.30", 4000, 4000, true), natRow(8, "later", "TCP", 5000, 5000, "192.0.2.40", 5000, 5000, true)}
 	client, state, closeServer := newNATMockClient(t, rows)
 	defer closeServer()
-	rule := NATRule{Name: "web", Protocol: "both", ExternalPortStart: 8080, ExternalPortEnd: 8081, InternalClient: "192.0.2.80", InternalPortStart: 80, InternalPortEnd: 81}
+	rule := zyxel.NATRule{Name: "web", Protocol: "both", ExternalPortStart: 8080, ExternalPortEnd: 8081, InternalClient: "192.0.2.80", InternalPortStart: 80, InternalPortEnd: 81}
 	created, err := client.CreateNATRule(context.Background(), rule)
 	if err != nil || !created {
 		t.Fatalf("CreateNATRule() = %v, %v", created, err)
@@ -36,11 +39,7 @@ func TestNATRuleCreateDeleteUsesCurrentIndexesAndRotatedSession(t *testing.T) {
 	if state.lastBody["Protocol"] != "TCP+UDP" || state.lastBody["Description"] != "web" {
 		t.Fatalf("unexpected POST body: %#v", state.lastBody)
 	}
-	got, err := client.NATRules(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	found, err := findNATRule(got, "web")
+	found, err := client.ReadNATRule(context.Background(), "web")
 	if err != nil || found == nil || found.Protocol != "both" || found.Index != 3 {
 		t.Fatalf("readback rule = %#v, %v", found, err)
 	}
@@ -63,14 +62,14 @@ func TestNATRuleCreateRejectsDuplicateAndOverlappingRulesBeforeWrite(t *testing.
 	rows := []map[string]any{natRow(1, "existing", "TCP+UDP", 80, 90, "192.0.2.1", 8080, 8090, true)}
 	client, state, closeServer := newNATMockClient(t, rows)
 	defer closeServer()
-	_, err := client.CreateNATRule(context.Background(), NATRule{Name: "new", Protocol: "tcp", ExternalPortStart: 90, ExternalPortEnd: 90, InternalClient: "192.0.2.2", InternalPortStart: 90, InternalPortEnd: 90})
+	_, err := client.CreateNATRule(context.Background(), zyxel.NATRule{Name: "new", Protocol: "tcp", ExternalPortStart: 90, ExternalPortEnd: 90, InternalClient: "192.0.2.2", InternalPortStart: 90, InternalPortEnd: 90})
 	if err == nil {
 		t.Fatal("expected overlapping TCP rule to be rejected")
 	}
 	if state.writes != 0 {
 		t.Fatalf("conflicting create sent %d writes", state.writes)
 	}
-	_, err = client.CreateNATRule(context.Background(), NATRule{Name: "existing", Protocol: "udp", ExternalPortStart: 100, ExternalPortEnd: 100, InternalClient: "192.0.2.2", InternalPortStart: 100, InternalPortEnd: 100})
+	_, err = client.CreateNATRule(context.Background(), zyxel.NATRule{Name: "existing", Protocol: "udp", ExternalPortStart: 100, ExternalPortEnd: 100, InternalClient: "192.0.2.2", InternalPortStart: 100, InternalPortEnd: 100})
 	if err == nil {
 		t.Fatal("expected duplicate name to be rejected")
 	}
@@ -106,8 +105,8 @@ func TestNATRuleDeleteRejectsAmbiguousNameAndMissingIsIdempotent(t *testing.T) {
 func TestNATRuleCreateRejectsInvalidResolvedInputBeforeOpeningSession(t *testing.T) {
 	client, state, closeServer := newNATMockClient(t, nil)
 	defer closeServer()
-	valid := NATRule{Name: "rule", Protocol: "tcp", ExternalPortStart: 80, ExternalPortEnd: 80, InternalClient: "192.0.2.1", InternalPortStart: 8080, InternalPortEnd: 8080}
-	invalid := []NATRule{
+	valid := zyxel.NATRule{Name: "rule", Protocol: "tcp", ExternalPortStart: 80, ExternalPortEnd: 80, InternalClient: "192.0.2.1", InternalPortStart: 8080, InternalPortEnd: 8080}
+	invalid := []zyxel.NATRule{
 		{Name: " ", Protocol: "tcp", ExternalPortStart: 80, ExternalPortEnd: 80, InternalClient: "192.0.2.1", InternalPortStart: 80, InternalPortEnd: 80},
 		{Name: "rule", Protocol: "TCP", ExternalPortStart: 80, ExternalPortEnd: 80, InternalClient: "192.0.2.1", InternalPortStart: 80, InternalPortEnd: 80},
 		{Name: "rule", Protocol: "tcp", ExternalPortStart: 0, ExternalPortEnd: 0, InternalClient: "192.0.2.1", InternalPortStart: 1, InternalPortEnd: 1},
@@ -132,7 +131,7 @@ func TestNATRuleCreateAmbiguousWritePreservesCreatedIdentity(t *testing.T) {
 	client, state, closeServer := newNATMockClient(t, nil)
 	defer closeServer()
 	state.badWriteResponse = true
-	rule := NATRule{Name: "recovery-rule", Protocol: "tcp", ExternalPortStart: 8080, ExternalPortEnd: 8080, InternalClient: "192.0.2.80", InternalPortStart: 80, InternalPortEnd: 80}
+	rule := zyxel.NATRule{Name: "recovery-rule", Protocol: "tcp", ExternalPortStart: 8080, ExternalPortEnd: 8080, InternalClient: "192.0.2.80", InternalPortStart: 80, InternalPortEnd: 80}
 	created, err := client.CreateNATRule(context.Background(), rule)
 	if err == nil || !created {
 		t.Fatalf("expected ambiguous applied create, got created=%v err=%v", created, err)
@@ -178,62 +177,43 @@ func TestNATResourceCreateKeepsKnownStateAfterAmbiguousPOST(t *testing.T) {
 	}
 }
 
-func TestNATRuleParseFailsClosedForMalformedOrUnsupportedRows(t *testing.T) {
-	base := natRow(1, "bad", "TCP", 80, 81, "192.0.2.1", 80, 81, true)
-	for _, mutate := range []func(map[string]any){
-		func(row map[string]any) { row["Protocol"] = "ICMP" },
-		func(row map[string]any) { row["ExternalPortStart"] = 0 },
-		func(row map[string]any) { row["Index"] = 1.5 },
-		func(row map[string]any) { row["Index"] = float64(9007199254740992) },
-		func(row map[string]any) { row["InternalClient"] = "::ffff:192.0.2.1" },
-		func(row map[string]any) { row["InternalPortEnd"] = 83 },
-	} {
-		row := make(map[string]any, len(base))
-		for key, value := range base {
-			row[key] = value
-		}
-		mutate(row)
-		if _, err := parseNATRule(row); err == nil {
-			t.Fatalf("expected row rejection: %#v", row)
-		}
-	}
-	row := natRow(1, "valid", "TCP+UDP", 80, 81, "192.0.2.1", 8080, 8081, false)
-	row["FirmwareMetadata"] = "ignored"
-	parsed, err := parseNATRule(row)
-	if err != nil || parsed.Protocol != "both" || parsed.Enabled {
-		t.Fatalf("metadata/protocol parse = %#v, %v", parsed, err)
-	}
-	allRow := natRow(1, "all-protocols", "ALL", 6690, 6690, "192.0.2.1", 6690, 6690, true)
-	allParsed, err := parseNATRule(allRow)
-	if err != nil || allParsed.Protocol != "all" {
-		t.Fatalf("ALL protocol parse = %#v, %v", allParsed, err)
-	}
-}
-
 func TestNATRuleAllProtocolRoundTripsAndBlocksEveryPort(t *testing.T) {
 	rows := []map[string]any{natRow(1, "all-protocols", "ALL", 6690, 6690, "192.0.2.1", 6690, 6690, true)}
 	client, state, closeServer := newNATMockClient(t, rows)
 	defer closeServer()
-	if _, err := client.CreateNATRule(context.Background(), NATRule{Name: "tcp-clash", Protocol: "tcp", ExternalPortStart: 6690, ExternalPortEnd: 6690, InternalClient: "192.0.2.2", InternalPortStart: 6690, InternalPortEnd: 6690}); err == nil {
+	if _, err := client.CreateNATRule(context.Background(), zyxel.NATRule{Name: "tcp-clash", Protocol: "tcp", ExternalPortStart: 6690, ExternalPortEnd: 6690, InternalClient: "192.0.2.2", InternalPortStart: 6690, InternalPortEnd: 6690}); err == nil {
 		t.Fatal("expected an all-protocol rule to block any overlapping protocol")
 	}
 	if state.writes != 0 {
 		t.Fatalf("conflicting create sent %d writes", state.writes)
 	}
-	created, err := client.CreateNATRule(context.Background(), NATRule{Name: "webdav", Protocol: "all", ExternalPortStart: 5006, ExternalPortEnd: 5006, InternalClient: "192.0.2.3", InternalPortStart: 5006, InternalPortEnd: 5006})
+	created, err := client.CreateNATRule(context.Background(), zyxel.NATRule{Name: "webdav", Protocol: "all", ExternalPortStart: 5006, ExternalPortEnd: 5006, InternalClient: "192.0.2.3", InternalPortStart: 5006, InternalPortEnd: 5006})
 	if err != nil || !created {
 		t.Fatalf("CreateNATRule() = %v, %v", created, err)
 	}
 	if state.lastBody["Protocol"] != "ALL" {
 		t.Fatalf("unexpected POST body: %#v", state.lastBody)
 	}
-	got, err := client.NATRules(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	found, err := findNATRule(got, "webdav")
+	found, err := client.ReadNATRule(context.Background(), "webdav")
 	if err != nil || found == nil || found.Protocol != "all" {
 		t.Fatalf("readback rule = %#v, %v", found, err)
+	}
+}
+
+func TestNATPublicReadRejectsDuplicateNamesAndReportsMissing(t *testing.T) {
+	client, state, closeServer := newNATMockClient(t, []map[string]any{
+		natRow(1, "duplicate", "TCP", 80, 80, "192.0.2.1", 80, 80, true),
+		natRow(2, "duplicate", "UDP", 81, 81, "192.0.2.2", 81, 81, true),
+	})
+	defer closeServer()
+	if found, err := client.ReadNATRule(context.Background(), "duplicate"); err == nil || found != nil {
+		t.Fatalf("duplicate read = %#v, %v", found, err)
+	}
+	if found, err := client.ReadNATRule(context.Background(), "missing"); err != nil || found != nil {
+		t.Fatalf("missing read = %#v, %v", found, err)
+	}
+	if state.writes != 0 {
+		t.Fatal("reads must not mutate the router")
 	}
 }
 
@@ -250,7 +230,7 @@ type natMockState struct {
 	badWriteResponse    bool
 }
 
-func newNATMockClient(t *testing.T, rows []map[string]any) (*Client, *natMockState, func()) {
+func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natMockState, func()) {
 	t.Helper()
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -267,7 +247,7 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*Client, *natMockSta
 	})
 	mux.HandleFunc("/UserLogin", func(w http.ResponseWriter, r *http.Request) {
 		state.logins++
-		var payload encryptedPayload
+		var payload routertest.Payload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 			return
@@ -285,7 +265,7 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*Client, *natMockSta
 		}
 		iv, _ := base64.StdEncoding.DecodeString(payload.IV)
 		ciphertext, _ := base64.StdEncoding.DecodeString(payload.Content)
-		plain, err := decryptCBC(state.key, iv[:16], ciphertext)
+		plain, err := routertest.DecryptCBC(state.key, iv[:16], ciphertext)
 		if err != nil {
 			t.Error(err)
 			return
@@ -313,14 +293,14 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*Client, *natMockSta
 		if r.Header.Get("CSRFToken") != state.sessionKey {
 			t.Errorf("write omitted current CSRF token")
 		}
-		var payload encryptedPayload
+		var payload routertest.Payload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 			return
 		}
 		iv, _ := base64.StdEncoding.DecodeString(payload.IV)
 		ciphertext, _ := base64.StdEncoding.DecodeString(payload.Content)
-		plain, err := decryptCBC(state.key, iv[:16], ciphertext)
+		plain, err := routertest.DecryptCBC(state.key, iv[:16], ciphertext)
 		if err != nil {
 			t.Error(err)
 			return
@@ -360,7 +340,7 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*Client, *natMockSta
 	server.Listener = listener
 	server.Start()
 	state.endpoint = server.URL
-	client, err := NewClient(server.URL, Credentials{Username: "mock", Password: "mock"}, 2*time.Second)
+	client, err := zyxel.NewClient(server.URL, zyxel.Credentials{Username: "mock", Password: "mock"}, 2*time.Second)
 	if err != nil {
 		server.Close()
 		t.Fatal(err)
@@ -382,9 +362,9 @@ func writeNATEncrypted(t *testing.T, w http.ResponseWriter, key []byte, value an
 	if _, err := rand.Read(iv); err != nil {
 		t.Fatal(err)
 	}
-	ciphertext, err := encryptCBC(key, iv, plain)
+	ciphertext, err := routertest.EncryptCBC(key, iv, plain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = json.NewEncoder(w).Encode(encryptedPayload{IV: base64.StdEncoding.EncodeToString(iv), Content: base64.StdEncoding.EncodeToString(ciphertext)})
+	_ = json.NewEncoder(w).Encode(routertest.Payload{IV: base64.StdEncoding.EncodeToString(iv), Content: base64.StdEncoding.EncodeToString(ciphertext)})
 }

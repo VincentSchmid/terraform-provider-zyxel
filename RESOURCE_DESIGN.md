@@ -83,6 +83,12 @@ methods (250–280), list/create/delete commands (594–669), and protocol mappi
 
 ## Project boundaries
 
+The implemented Go structure and mandatory package rules are defined in
+[ARCHITECTURE.md](ARCHITECTURE.md) and [AGENTS.md](AGENTS.md). The router API
+now lives in public `zyxel/`; `internal/provider/` contains Terraform adapters.
+The sibling deployment layout below is historical context, not the current Go
+package structure.
+
 ```text
 router/
 ├── zyxel-cli/                  upstream reference; kept unchanged
@@ -106,11 +112,10 @@ router/
 └── .agents/skills/             local scouting and execution skills
 ```
 
-Keep one provider package while the implementation is small. Add one
-`<name>_resource.go` plus meaningful tests per resource and typed client
-methods for each DAL domain. Split the client into `internal/client/` when
-its growth warrants that separation. Avoid a generic Terraform resource
-that accepts raw OIDs or untyped JSON payloads.
+Keep one `<name>_resource.go` adapter with meaningful tests per resource and
+typed API methods in `zyxel/<domain>.go`. The earlier single-package client
+layout is superseded by the enforced two-layer architecture. Avoid generic
+Terraform resources accepting raw OIDs or untyped JSON payloads.
 
 In the consumer, keep Terraform and provider version requirements, provider
 aliases/settings, and provider inputs in `main.tf`. Group each implemented

@@ -1,4 +1,4 @@
-package provider
+package zyxel
 
 import (
 	"context"
@@ -14,8 +14,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 func TestReadStatusUsesHybridLoginAndLogsOut(t *testing.T) {
@@ -93,10 +91,7 @@ func TestReadStatusUsesHybridLoginAndLogsOut(t *testing.T) {
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
-	endpoint, err := normalizeHost(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	endpoint := server.URL
 	client, err := NewClient(endpoint, Credentials{Username: "router-user", Password: "secret"}, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +100,7 @@ func TestReadStatusUsesHybridLoginAndLogsOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status["DeviceInfo"].(map[string]any)["ModelName"] != "Zyxel-Test" {
+	if status.ModelName == nil || *status.ModelName != "Zyxel-Test" {
 		t.Fatalf("unexpected status: %#v", status)
 	}
 	if !loggedOut {
@@ -136,81 +131,6 @@ func TestDecryptRejectsMalformedEncryptedResponse(t *testing.T) {
 	} {
 		if _, err := session.decryptResponse([]byte(payload)); err == nil {
 			t.Errorf("expected malformed response to be rejected: %s", payload)
-		}
-	}
-}
-
-func TestNormalizeHost(t *testing.T) {
-	for _, test := range []struct {
-		input, want string
-		invalid     bool
-	}{
-		{"192.0.2.10", "http://192.0.2.10", false},
-		{"https://router.example", "https://router.example", false},
-		{"http://user:pass@router", "", true},
-		{"http://router/admin", "", true},
-	} {
-		got, err := normalizeHost(test.input)
-		if test.invalid && err == nil {
-			t.Errorf("normalizeHost(%q) succeeded", test.input)
-		}
-		if !test.invalid && (err != nil || got != test.want) {
-			t.Errorf("normalizeHost(%q) = %q, %v; want %q", test.input, got, err, test.want)
-		}
-	}
-}
-
-func TestResolveCredentialsRequiresCompletePair(t *testing.T) {
-	t.Setenv("ZYXEL_USER", "env-user")
-	t.Setenv("ZYXEL_PASS", "env-pass")
-	user, pass := resolveCredentials(types.StringValue("config-user"), types.StringNull())
-	if user != "env-user" || pass != "env-pass" {
-		t.Fatalf("partial config should fall back to a complete environment pair")
-	}
-	user, pass = resolveCredentials(types.StringValue("config-user"), types.StringValue("config-pass"))
-	if user != "config-user" || pass != "config-pass" {
-		t.Fatalf("complete config pair should take precedence")
-	}
-	_, pass = resolveCredentials(types.StringValue("config-user"), types.StringValue(" pass "))
-	if pass != " pass " {
-		t.Fatal("configured password whitespace must be preserved")
-	}
-	t.Setenv("ZYXEL_USER", "")
-	t.Setenv("ZYXEL_PASS", "")
-	user, pass = resolveCredentials(types.StringValue("only-user"), types.StringNull())
-	if user != "only-user" || pass != "" {
-		t.Fatalf("incomplete credentials should not be combined")
-	}
-}
-
-func TestUnknownProviderSettings(t *testing.T) {
-	got := unknownSettings(providerModel{Host: types.StringUnknown(), Username: types.StringNull(), Password: types.StringUnknown(), TimeoutSeconds: types.Int64Unknown()})
-	if len(got) != 3 {
-		t.Fatalf("expected unknown host, password, and timeout, got %v", got)
-	}
-	seen := map[string]bool{}
-	for _, name := range got {
-		seen[name] = true
-	}
-	for _, name := range []string{"host", "password", "timeout_seconds"} {
-		if !seen[name] {
-			t.Errorf("unknown setting %q was not detected", name)
-		}
-	}
-}
-
-func TestMissingAndIncompleteConfigurationDiagnostics(t *testing.T) {
-	issues := validateConnectionSettings("", "", "")
-	if len(issues) != 2 || issues[0].summary != "Missing router host" || issues[1].summary != "Missing router credentials" {
-		t.Fatalf("unexpected missing configuration diagnostics: %#v", issues)
-	}
-	issues = validateConnectionSettings("router", "admin", "")
-	if len(issues) != 1 || issues[0].summary != "Incomplete router credentials" {
-		t.Fatalf("unexpected partial credentials diagnostic: %#v", issues)
-	}
-	for _, issue := range append(issues, validateConnectionSettings("", "", "")...) {
-		if strings.Contains(issue.detail, "admin") || strings.Contains(issue.detail, "secret") {
-			t.Fatalf("configuration diagnostic leaked a credential: %#v", issue)
 		}
 	}
 }
@@ -259,4 +179,43 @@ func writeEncrypted(t *testing.T, w http.ResponseWriter, key []byte, value any) 
 		t.Fatal(err)
 	}
 	_ = json.NewEncoder(w).Encode(encryptedPayload{IV: base64.StdEncoding.EncodeToString(iv), Content: base64.StdEncoding.EncodeToString(ciphertext)})
+}
+
+func TestNormalizeEndpoint(t *testing.T) {
+	for _, test := range []struct {
+		input, want string
+		invalid     bool
+	}{
+		{"192.0.2.10", "http://192.0.2.10", false},
+		{"https://router.example", "https://router.example", false},
+		{"http://user:pass@router", "", true},
+		{"http://router/admin", "", true},
+	} {
+		got, err := NormalizeEndpoint(test.input)
+		if test.invalid && err == nil {
+			t.Errorf("NormalizeEndpoint(%q) succeeded", test.input)
+		}
+		if !test.invalid && (err != nil || got != test.want) {
+			t.Errorf("NormalizeEndpoint(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+}
+
+func TestNewClientValidatesConfigurationWithoutNetwork(t *testing.T) {
+	for _, test := range []struct {
+		endpoint string
+		timeout  time.Duration
+	}{
+		{"", time.Second},
+		{"http://user:secret@router", time.Second},
+		{"http://router/admin", time.Second},
+		{"http://router", 0},
+		{"http://router", -time.Second},
+	} {
+		if _, err := NewClient(test.endpoint, Credentials{}, test.timeout); err == nil {
+			t.Errorf("accepted invalid client configuration: %q, %s", test.endpoint, test.timeout)
+		} else if strings.Contains(err.Error(), "secret") {
+			t.Fatal("configuration error leaked credentials")
+		}
+	}
 }

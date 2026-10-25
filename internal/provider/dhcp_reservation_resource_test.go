@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/internal/routertest"
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	resourceschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -47,7 +50,7 @@ func TestDHCPReservationCreateDeleteEncryptedLifecycle(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"RSAPublicKey": string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))})
 	})
 	mux.HandleFunc("/UserLogin", func(w http.ResponseWriter, r *http.Request) {
-		var payload encryptedPayload
+		var payload routertest.Payload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 			return
@@ -64,7 +67,7 @@ func TestDHCPReservationCreateDeleteEncryptedLifecycle(t *testing.T) {
 			return
 		}
 		sessionKey = "token-1"
-		writeEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": sessionKey})
+		routertest.WriteEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": sessionKey})
 	})
 	mux.HandleFunc("/cgi-bin/DAL", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -77,17 +80,17 @@ func TestDHCPReservationCreateDeleteEncryptedLifecycle(t *testing.T) {
 			if r.URL.Query().Get("oid") != "static_dhcp" {
 				t.Errorf("unexpected oid %q", r.URL.Query().Get("oid"))
 			}
-			writeEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "Object": rows})
+			routertest.WriteEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "Object": rows})
 		case http.MethodPost:
 			assertWriteHeaders(t, r, sessionKey)
-			var payload encryptedPayload
+			var payload routertest.Payload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Error(err)
 				return
 			}
 			ciphertext, _ := base64.StdEncoding.DecodeString(payload.Content)
 			iv, _ := base64.StdEncoding.DecodeString(payload.IV)
-			plain, err := decryptCBC(key, iv[:16], ciphertext)
+			plain, err := routertest.DecryptCBC(key, iv[:16], ciphertext)
 			if err != nil {
 				t.Error(err)
 				return
@@ -101,21 +104,21 @@ func TestDHCPReservationCreateDeleteEncryptedLifecycle(t *testing.T) {
 			}
 			rows = append(rows, map[string]any{"Index": float64(4), "MACAddr": posted["MACAddr"], "IPAddr": posted["IPAddr"], "Enable": posted["Enable"]})
 			sessionKey = "token-2"
-			writeEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": sessionKey})
+			routertest.WriteEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": sessionKey})
 		case http.MethodDelete:
 			assertWriteHeaders(t, r, sessionKey)
 			deleteIndex = r.URL.Query().Get("Index")
 			if deleteIndex != "4" {
 				t.Errorf("delete Index = %q, want freshly read index 4", deleteIndex)
 			}
-			var payload encryptedPayload
+			var payload routertest.Payload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Error(err)
 				return
 			}
 			ciphertext, _ := base64.StdEncoding.DecodeString(payload.Content)
 			iv, _ := base64.StdEncoding.DecodeString(payload.IV)
-			plain, err := decryptCBC(key, iv[:16], ciphertext)
+			plain, err := routertest.DecryptCBC(key, iv[:16], ciphertext)
 			if err != nil {
 				t.Error(err)
 				return
@@ -125,7 +128,7 @@ func TestDHCPReservationCreateDeleteEncryptedLifecycle(t *testing.T) {
 			}
 			rows = rows[:1]
 			sessionKey = "token-3"
-			writeEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": sessionKey})
+			routertest.WriteEncrypted(t, w, key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": sessionKey})
 		default:
 			t.Errorf("unexpected method %s", r.Method)
 		}
@@ -133,7 +136,7 @@ func TestDHCPReservationCreateDeleteEncryptedLifecycle(t *testing.T) {
 	mux.HandleFunc("/cgi-bin/UserLogout", func(w http.ResponseWriter, r *http.Request) { logoutKey = r.URL.Query().Get("sessionkey") })
 	server := httptest.NewServer(mux)
 	defer server.Close()
-	client, err := NewClient(server.URL, Credentials{Username: "user", Password: "not-printed"}, 3*time.Second)
+	client, err := zyxel.NewClient(server.URL, zyxel.Credentials{Username: "user", Password: "not-printed"}, 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,34 +165,6 @@ func assertWriteHeaders(t *testing.T, r *http.Request, token string) {
 	}
 	if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
 		t.Errorf("unexpected Content-Type %q", r.Header.Get("Content-Type"))
-	}
-}
-
-func TestDHCPReservationClientRejectsDuplicateAndMalformedRows(t *testing.T) {
-	rows := []DHCPReservation{{Index: 1, MACAddr: "AA:BB:CC:DD:EE:FF", IPAddr: "192.0.2.1", Enabled: true}}
-	if _, err := findDHCPReservation(rows, "aa:bb:cc:dd:ee:ff"); err != nil {
-		t.Fatalf("case-insensitive identity lookup failed: %v", err)
-	}
-	rows = append(rows, rows[0])
-	if _, err := findDHCPReservation(rows, "AA:BB:CC:DD:EE:FF"); err == nil || !strings.Contains(err.Error(), "multiple") {
-		t.Fatalf("expected duplicate identity error, got %v", err)
-	}
-	if _, err := normalizeImportMAC("not-a-mac"); err == nil {
-		t.Fatal("expected invalid import ID rejection")
-	}
-	if mac, err := normalizeImportMAC("aa-bb-cc-dd-ee-ff"); err != nil || mac != "AA:BB:CC:DD:EE:FF" {
-		t.Fatalf("normalized import MAC = %q, %v", mac, err)
-	}
-}
-
-func TestDHCPIndexValidation(t *testing.T) {
-	for _, value := range []any{float64(0), float64(-1), float64(1.5), "2", nil} {
-		if index, ok := integerValue(value); ok {
-			t.Errorf("integerValue(%#v) = %d, true; want invalid", value, index)
-		}
-	}
-	if index, ok := integerValue(float64(4)); !ok || index != 4 {
-		t.Fatalf("integerValue(4) = %d, %t", index, ok)
 	}
 }
 
@@ -284,7 +259,7 @@ func TestDHCPValidateConfigEnabled(t *testing.T) {
 }
 
 type dhcpMockRouter struct {
-	client                 *Client
+	client                 *zyxel.Client
 	server                 *httptest.Server
 	mu                     sync.Mutex
 	key                    []byte
@@ -317,7 +292,7 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 		_ = json.NewEncoder(w).Encode(map[string]string{"RSAPublicKey": string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))})
 	})
 	mux.HandleFunc("/UserLogin", func(w http.ResponseWriter, r *http.Request) {
-		var payload encryptedPayload
+		var payload routertest.Payload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 			return
@@ -340,7 +315,7 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 			mock.maxActiveSessions = mock.activeSessions
 		}
 		mock.mu.Unlock()
-		writeEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": mock.token})
+		routertest.WriteEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": mock.token})
 	})
 	mux.HandleFunc("/cgi-bin/DAL", func(w http.ResponseWriter, r *http.Request) {
 		mock.mu.Lock()
@@ -352,7 +327,7 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 		case http.MethodGet:
 			mock.readCount++
 			if mock.malformedRead {
-				writeEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "Object": "malformed"})
+				routertest.WriteEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "Object": "malformed"})
 				return
 			}
 			rows := mock.rows
@@ -368,7 +343,7 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 				last["IPAddr"] = mock.readbackIPOverride
 				rows[len(rows)-1] = last
 			}
-			writeEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "Object": rows})
+			routertest.WriteEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "Object": rows})
 		case http.MethodPost, http.MethodDelete:
 			mock.writeCount++
 			if mock.writeHTTPStatus != 0 {
@@ -379,14 +354,14 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 				t.Errorf("write headers missing current token")
 			}
 			if r.Method == http.MethodPost {
-				var payload encryptedPayload
+				var payload routertest.Payload
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					t.Error(err)
 					return
 				}
 				ciphertext, _ := base64.StdEncoding.DecodeString(payload.Content)
 				iv, _ := base64.StdEncoding.DecodeString(payload.IV)
-				plain, err := decryptCBC(mock.key, iv[:16], ciphertext)
+				plain, err := routertest.DecryptCBC(mock.key, iv[:16], ciphertext)
 				if err != nil {
 					t.Error(err)
 					return
@@ -403,9 +378,9 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 				mock.rows = append(mock.rows, map[string]any{"Index": float64(len(mock.rows) + 1), "MACAddr": row["MACAddr"], "IPAddr": ip, "Enable": row["Enable"]})
 			} else {
 				mock.lastDeleteIndex = r.URL.Query().Get("Index")
-				index, _ := integerValue(parseIndex(mock.lastDeleteIndex))
+				index, _ := fixtureInteger(parseIndex(mock.lastDeleteIndex))
 				for i := range mock.rows {
-					if n, ok := integerValue(mock.rows[i]["Index"]); ok && n == index {
+					if n, ok := fixtureInteger(mock.rows[i]["Index"]); ok && n == index {
 						mock.rows = append(mock.rows[:i], mock.rows[i+1:]...)
 						break
 					}
@@ -416,7 +391,7 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 				_, _ = w.Write([]byte("not-encrypted-json"))
 				return
 			}
-			writeEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": mock.token})
+			routertest.WriteEncrypted(t, w, mock.key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": mock.token})
 		default:
 			t.Errorf("unexpected method %s", r.Method)
 		}
@@ -430,7 +405,7 @@ func newDHCPMockRouter(t *testing.T) *dhcpMockRouter {
 		mock.activeSessions--
 	})
 	mock.server = httptest.NewServer(mux)
-	mock.client, err = NewClient(mock.server.URL, Credentials{Username: "test-user", Password: "test-password"}, 3*time.Second)
+	mock.client, err = zyxel.NewClient(mock.server.URL, zyxel.Credentials{Username: "test-user", Password: "test-password"}, 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,6 +515,12 @@ func TestDHCPDuplicateCollisionsNeverWrite(t *testing.T) {
 	mock := newDHCPMockRouter(t)
 	mac := "AA:BB:CC:DD:EE:12"
 	mock.rows = []map[string]any{{"Index": float64(1), "MACAddr": mac, "IPAddr": "192.0.2.12", "Enable": true}, {"Index": float64(2), "MACAddr": mac, "IPAddr": "192.0.2.12", "Enable": true}}
+	if found, err := mock.client.ReadDHCPReservation(context.Background(), mac); err == nil || found != nil {
+		t.Fatalf("duplicate public read = %#v, %v", found, err)
+	}
+	if found, err := mock.client.ReadDHCPReservation(context.Background(), "AA:BB:CC:DD:EE:99"); err != nil || found != nil {
+		t.Fatalf("missing public read = %#v, %v", found, err)
+	}
 	created, err := mock.client.CreateDHCPReservation(context.Background(), mac, "192.0.2.12", true)
 	if err == nil || created || mock.writeCount != 0 {
 		t.Fatalf("duplicate create created=%t writes=%d err=%v", created, mock.writeCount, err)
@@ -634,4 +615,14 @@ func TestDHCPClientSerializesConcurrentSessions(t *testing.T) {
 	if mock.maxActiveSessions != 1 || mock.activeSessions != 0 {
 		t.Fatalf("session overlap max=%d active=%d", mock.maxActiveSessions, mock.activeSessions)
 	}
+}
+
+func fixtureInteger(value any) (int64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int64(v), v == float64(int64(v)) && v >= 1
+	case int64:
+		return v, v >= 1
+	}
+	return 0, false
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	datasourceschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -14,7 +16,7 @@ var _ datasource.DataSourceWithConfigure = &StatusDataSource{}
 
 func NewStatusDataSource() datasource.DataSource { return &StatusDataSource{} }
 
-type StatusDataSource struct{ client *Client }
+type StatusDataSource struct{ client *zyxel.Client }
 type statusModel struct {
 	ModelName       types.String `tfsdk:"model_name"`
 	FirmwareVersion types.String `tfsdk:"firmware_version"`
@@ -35,9 +37,9 @@ func (d *StatusDataSource) Configure(_ context.Context, req datasource.Configure
 	if req.ProviderData == nil {
 		return
 	}
-	client, ok := req.ProviderData.(*Client)
+	client, ok := req.ProviderData.(*zyxel.Client)
 	if !ok {
-		resp.Diagnostics.AddError("Unexpected data source configuration", fmt.Sprintf("Expected *Client, got %T.", req.ProviderData))
+		resp.Diagnostics.AddError("Unexpected data source configuration", fmt.Sprintf("Expected *zyxel.Client, got %T.", req.ProviderData))
 		return
 	}
 	d.client = client
@@ -52,17 +54,6 @@ func (d *StatusDataSource) Read(ctx context.Context, _ datasource.ReadRequest, r
 		resp.Diagnostics.AddError("Unable to read router status", err.Error())
 		return
 	}
-	model := statusModel{ModelName: nestedString(status, "DeviceInfo", "ModelName"), FirmwareVersion: nestedString(status, "DeviceInfo", "SoftwareVersion"), Hostname: nestedString(status, "SystemInfo", "HostName")}
+	model := statusModel{ModelName: types.StringPointerValue(status.ModelName), FirmwareVersion: types.StringPointerValue(status.FirmwareVersion), Hostname: types.StringPointerValue(status.Hostname)}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &model)...)
-}
-func nestedString(object map[string]any, parent, key string) types.String {
-	child, ok := object[parent].(map[string]any)
-	if !ok {
-		return types.StringNull()
-	}
-	value, ok := child[key].(string)
-	if !ok {
-		return types.StringNull()
-	}
-	return types.StringValue(value)
 }

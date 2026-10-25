@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -35,7 +37,7 @@ type firewallFixture struct {
 	failReadback, ignoreWrite, brokenWrite, serverError bool
 }
 
-func newFirewallFixture(t *testing.T) (*Client, *firewallFixture) {
+func newFirewallFixture(t *testing.T) (*zyxel.Client, *firewallFixture) {
 	t.Helper()
 	f := &firewallFixture{peer: newTerraformACLFixture(t), readResult: "ZCFG_SUCCESS", writeResult: "ZCFG_SUCCESS", ipv4: true, ipv6: true, level: "Low"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +134,7 @@ func newFirewallFixture(t *testing.T) (*Client, *firewallFixture) {
 	}))
 	t.Cleanup(server.Close)
 	f.endpoint = server.URL
-	client, err := NewClient(server.URL, Credentials{Username: "fixture-user", Password: "fixture-password"}, 2*time.Second)
+	client, err := zyxel.NewClient(server.URL, zyxel.Credentials{Username: "fixture-user", Password: "fixture-password"}, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,17 +295,17 @@ func TestAccFirewallLifecycle(t *testing.T) {
 	})
 }
 
-func testFirewallSettings(dos bool) FirewallSettings {
-	return FirewallSettings{IPv4Enabled: true, IPv6Enabled: true, SecurityLevel: "medium", DoSProtectionEnabled: dos}
+func testFirewallSettings(dos bool) zyxel.FirewallSettings {
+	return zyxel.FirewallSettings{IPv4Enabled: true, IPv6Enabled: true, SecurityLevel: "medium", DoSProtectionEnabled: dos}
 }
 
 func TestFirewallGeneralSettings(t *testing.T) {
 	client, f := newFirewallFixture(t)
-	for _, settings := range []FirewallSettings{
-		{true, false, "low", true},
-		{false, true, "medium", true},
-		{false, false, "high", false},
-		{true, true, "medium", true},
+	for _, settings := range []zyxel.FirewallSettings{
+		{IPv4Enabled: true, IPv6Enabled: false, SecurityLevel: "low", DoSProtectionEnabled: true},
+		{IPv4Enabled: false, IPv6Enabled: true, SecurityLevel: "medium", DoSProtectionEnabled: true},
+		{IPv4Enabled: false, IPv6Enabled: false, SecurityLevel: "high", DoSProtectionEnabled: false},
+		{IPv4Enabled: true, IPv6Enabled: true, SecurityLevel: "medium", DoSProtectionEnabled: true},
 	} {
 		applied, err := client.SetFirewall(context.Background(), settings)
 		if err != nil || !applied {
@@ -317,7 +319,7 @@ func TestFirewallGeneralSettings(t *testing.T) {
 	if f.writes != 7 {
 		t.Fatalf("expected four General and three DoS writes, got %d", f.writes)
 	}
-	if applied, err := client.SetFirewall(context.Background(), FirewallSettings{SecurityLevel: "invalid"}); applied || err == nil || f.writes != 7 {
+	if applied, err := client.SetFirewall(context.Background(), zyxel.FirewallSettings{SecurityLevel: "invalid"}); applied || err == nil || f.writes != 7 {
 		t.Fatal("invalid security level should fail before accessing the router")
 	}
 }
@@ -372,7 +374,7 @@ resource "zyxel_firewall" "router" {
 }`, f.endpoint, ipv4, ipv6, level)
 	}
 	var steps []testresource.TestStep
-	for _, settings := range []FirewallSettings{{true, false, "low", true}, {false, true, "medium", true}, {false, false, "high", true}, {true, true, "medium", true}} {
+	for _, settings := range []zyxel.FirewallSettings{{IPv4Enabled: true, IPv6Enabled: false, SecurityLevel: "low", DoSProtectionEnabled: true}, {IPv4Enabled: false, IPv6Enabled: true, SecurityLevel: "medium", DoSProtectionEnabled: true}, {IPv4Enabled: false, IPv6Enabled: false, SecurityLevel: "high", DoSProtectionEnabled: true}, {IPv4Enabled: true, IPv6Enabled: true, SecurityLevel: "medium", DoSProtectionEnabled: true}} {
 		step := testresource.TestStep{Config: config(settings.IPv4Enabled, settings.IPv6Enabled, settings.SecurityLevel), Check: testresource.ComposeTestCheckFunc(
 			testresource.TestCheckResourceAttr(address, "ipv4_enabled", fmt.Sprint(settings.IPv4Enabled)),
 			testresource.TestCheckResourceAttr(address, "ipv6_enabled", fmt.Sprint(settings.IPv6Enabled)),

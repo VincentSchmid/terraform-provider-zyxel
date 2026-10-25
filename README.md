@@ -13,6 +13,25 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 - Terraform 1.14 or newer
 - Go 1.27 or newer (only to build the provider yourself)
 
+## Go API And Project Structure
+
+The provider uses the public, Terraform-independent
+`github.com/VincentSchmid/terraform-provider-zyxel/zyxel` Go package. It provides
+typed status, DHCP, NAT, ACL, and firewall-settings operations, with session locking,
+identity resolution, validation, and write verification. Other Go programs can
+import it without importing the Terraform adapter.
+
+`internal/provider/` contains Terraform schemas, plan/state handling, imports,
+and diagnostics only. Cloudflare feed fetching lives separately in
+`internal/cloudflare/`. See [ARCHITECTURE.md](ARCHITECTURE.md) for the enforced
+package boundaries and [zyxel/example_test.go](zyxel/example_test.go) for direct
+Go usage. [AGENTS.md](AGENTS.md) makes these rules mandatory for future changes;
+dependency-boundary tests run in the normal test suite.
+
+Create operations can return an error after a write succeeded or may have
+succeeded. Direct Go callers must inspect the returned outcome and reconcile by
+natural identity before retrying, just as the provider preserves recovery state.
+
 ## Installation
 
 The provider is published on the
