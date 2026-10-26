@@ -27,16 +27,25 @@ only one `zyxel_lan` instance per group, including across Terraform states.
 
 ## DHCP Modes And Ownership
 
-- `server` corresponds to **Enable**. Set both pool addresses. They must be
+- `dhcp.mode = "server"` corresponds to **Enable**. Set both pool addresses and
+  `dhcp.dhcp_lease_time`. Pool addresses must be
   ordered usable addresses in the LAN subnet and must not include the router IP.
-- `disabled` corresponds to **Disable**. Omit pool and relay addresses.
-- `relay` corresponds to **DHCP Relay**. Set `relay_server_address`; omit the pool.
-- `auto_reserve_ip` may be true only in `server` mode. When switching away from
+- `dhcp.mode = "disabled"` corresponds to **Disable**. Omit pool, lease, and relay fields.
+- `dhcp.mode = "relay"` corresponds to **DHCP Relay**. Set `dhcp.relay_server_address`; omit the pool and lease.
+- `dhcp.auto_reserve_ip` may be true only in `server` mode. When switching away from
   server mode, omit it or set it to false.
 
 Inactive DHCP pool/relay fields are omitted from state. They are not cleared on
 the router; switching modes writes only the fields needed for the new mode.
-IPv6, DNS, DHCP lease time, and other settings remain outside this resource.
+Lease strings accept whole days, hours, and minutes, separately or combined in
+that order: `1d`, `24h`, `1440m`, and `1d5h12m`. The range is `1m` through `365d`.
+The API receives the total in seconds; no rounding is performed. Refresh retains
+an equivalent configured spelling; import uses a canonical days/hours/minutes form.
+
+Top-level `dns_mode` defaults to `proxy`; `isp` advertises ISP DNS instead.
+It is only active in server mode. For relay/disabled, omit it or use `proxy`;
+stored DNS and lease settings are left untouched. Static DNS is not supported.
+IPv6 and other unrelated settings remain outside this resource.
 IGMP snooping combines the UI's Active switch and Standard/Blocking mode into
 `disabled`, `standard`, or `blocking`.
 
@@ -62,6 +71,16 @@ and destruction but do not make changes atomic or coordinate web UI users.
 
 The protocol is based on extracted Zyxel UI code and verified with encrypted
 local mocks, not hardware writes or an exact-model/firmware compatibility check.
+
+## Breaking Schema Migration
+
+The former top-level `dhcp_mode`, pool addresses, `auto_reserve_ip`, and
+`relay_server_address` are removed. Move them inside `dhcp = { ... }`, rename
+`dhcp_mode` to `mode`, and add `dhcp_lease_time` for server mode. There are no
+compatibility aliases or automatic old-state upgrades. Back up state, update HCL,
+remove only this resource's old state binding (`terraform state rm ADDRESS`),
+then reimport using its unchanged exact group name before planning. Neither state
+removal nor import changes the router. Do not destroy/recreate the interface group.
 
 {{.SchemaMarkdown | trimspace}}
 

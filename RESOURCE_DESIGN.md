@@ -9,10 +9,16 @@ the current provider.
 
 `zyxel_lan` manages per-group Home Networking LAN Setup: IPv4 address/mask,
 IGMP snooping (`disabled`, `standard`, `blocking`), DHCP (`server`, `disabled`,
-`relay`), server pool/auto-reserve, and relay IPv4 address. IPv6 is deferred.
+`relay`), server pool/auto-reserve/lease, and relay IPv4 address. DHCP uses a
+required `dhcp = { ... }` object with `mode`, replacing the former flat fields.
+Server leases accept days/hours/minutes (`1d5h12m`, also `24h` or `1440m`) from
+1 minute to 365 days and map to `DHCP_LeaseTime` seconds. Top-level `dns_mode`
+defaults to `proxy` (`DNSProxy`); `isp` (`FromISP`) is server-only. IPv6 is deferred.
 The existing exact-name group is selected by `interface_group_id`; Create adopts
 its built-in settings, Update uses allowlisted PUT, and Delete stops management.
-DNS, lease times, IPv6, and unrelated fields are neither copied nor written.
+DNS and lease time are written only in server mode. Other modes require inactive
+`dns_mode = "proxy"` and leave stored DNS/lease fields alone. IPv6 and unrelated
+fields are neither copied nor written. Old flat state requires explicit reimport.
 Inactive DHCP fields are null in state and not cleared on the router.
 
 `zyxel_interface_group` implements explicit port-based groups in Network

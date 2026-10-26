@@ -58,7 +58,7 @@ func TestAccInterfaceGroupLANReference(t *testing.T) {
 	_, f := networkTestClient(t)
 	config := lanTestHCL(f.Server.URL, "zyxel_interface_group.test.id", "server") + interfaceGroupTestHCL("Guests")
 	testresource.Test(t, testresource.TestCase{ProtoV6ProviderFactories: natTestFactories, Steps: []testresource.TestStep{
-		{Config: config, Check: testresource.ComposeTestCheckFunc(testresource.TestCheckResourceAttr("zyxel_interface_group.test", "id", "Guests"), testresource.TestCheckResourceAttr("zyxel_lan.test", "interface_group_id", "Guests"), testresource.TestCheckResourceAttr("zyxel_lan.test", "beginning_ip_address", "192.0.2.50"))},
+		{Config: config, Check: testresource.ComposeTestCheckFunc(testresource.TestCheckResourceAttr("zyxel_interface_group.test", "id", "Guests"), testresource.TestCheckResourceAttr("zyxel_lan.test", "interface_group_id", "Guests"), testresource.TestCheckResourceAttr("zyxel_lan.test", "dhcp.beginning_ip_address", "192.0.2.50"))},
 		{ResourceName: "zyxel_interface_group.test", ImportState: true, ImportStateId: "Guests", ImportStateVerify: true},
 		{ResourceName: "zyxel_lan.test", ImportState: true, ImportStateId: "Guests", ImportStateVerify: true},
 	}, CheckDestroy: func(*terraform.State) error {
