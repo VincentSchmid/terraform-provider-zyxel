@@ -230,6 +230,8 @@ does not support adding accepts after that drop already exists.
 
 For a dynamic accept collection followed by a drop, use `zyxel_acl_policy` with
 an ordered `rules` list; see [the example](examples/resources/zyxel_acl_policy/resource.tf).
+Policy rules may also set a shared `service_id` instead of an inline `protocol`
+and ports; those rows are created through the same ACL rule write path.
 It stages and verifies a new generation behind the old drop before retiring old
 accepts and finally the old drop. This supports collection growth/shrink without
 an undocumented router reorder operation. It is restricted to a common traffic

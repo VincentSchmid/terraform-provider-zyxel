@@ -27,3 +27,34 @@ resource "zyxel_acl_policy" "https" {
       source_cidr = "0.0.0.0/0"
   })])
 }
+
+# A custom service replaces the inline protocol and port filters for every rule.
+# The computed protocol is then "all" and the service selects protocol and ports.
+resource "zyxel_service" "https" {
+  name              = "policy-https"
+  protocol          = "tcp"
+  source_ports      = "*"
+  destination_ports = "443"
+}
+
+locals {
+  service_filter = {
+    ip_version       = "ipv4"
+    direction        = "wan_to_lan"
+    destination_cidr = "203.0.113.10/32"
+    service_id       = zyxel_service.https.id
+  }
+}
+
+resource "zyxel_acl_policy" "https_service" {
+  name = "HTTPS-Service-Sources"
+  rules = concat([
+    for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
+      action      = "accept"
+      source_cidr = cidr
+    })
+    ], [merge(local.service_filter, {
+      action      = "drop"
+      source_cidr = "0.0.0.0/0"
+  })])
+}

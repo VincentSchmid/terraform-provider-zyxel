@@ -46,6 +46,134 @@ resource "zyxel_acl_policy" "https" {
 `, endpoint, sources)
 }
 
+func policyServiceTestConfig(endpoint, sources string) string {
+	return fmt.Sprintf(`
+provider "zyxel" {
+  host = %q
+  username = "fixture-user"
+  password = "fixture-password"
+}
+resource "zyxel_service" "https" {
+  name = "policy-https"
+  protocol = "tcp"
+  source_ports = "*"
+  destination_ports = "443"
+}
+resource "zyxel_acl_policy" "service" {
+  name = "policy-service"
+  rules = concat([
+    for cidr in %s : {
+      action = "accept"
+      ip_version = "ipv4"
+      direction = "wan_to_lan"
+      source_cidr = cidr
+      destination_cidr = "203.0.113.10/32"
+      service_id = zyxel_service.https.id
+    }
+  ], [{
+    action = "drop"
+    ip_version = "ipv4"
+    direction = "wan_to_lan"
+    source_cidr = "0.0.0.0/0"
+    destination_cidr = "203.0.113.10/32"
+    service_id = zyxel_service.https.id
+  }])
+}
+`, endpoint, sources)
+}
+
+func TestAccACLPolicy_serviceRules(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	f := newTerraformACLFixture(t)
+	config := policyServiceTestConfig(f.server.URL, `["198.51.100.0/24"]`)
+	resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
+		{Config: config, ConfigStateChecks: []statecheck.StateCheck{
+			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("protocol"), knownvalue.StringExact("all")),
+			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("service_id"), knownvalue.StringExact("101")),
+			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("rules").AtSliceIndex(1).AtMapKey("destination_ports"), knownvalue.Null()),
+		}},
+		{Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+		{ResourceName: "zyxel_acl_policy.service", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "name", ImportStateIdFunc: func(*terraform.State) (string, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, row := range f.rows {
+				name, ok := row["Name"].(string)
+				if !ok || !strings.HasPrefix(name, "policy-service-g") {
+					continue
+				}
+				if index := fixtureInt(row["X_ZYXEL_ServiceIndex"]); index != 101 {
+					return "", fmt.Errorf("policy row %q does not reference the service: %d", name, index)
+				}
+				return "policy-service/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-service-g"), "-001"), nil
+			}
+			return "", fmt.Errorf("no policy generation found")
+		}},
+	}})
+	if len(f.rows) != 1 || f.rows[0]["Name"] != "unmanaged" {
+		t.Fatal("policy cleanup changed unrelated prefix")
+	}
+}
+
+func policyFilterTestConfig(endpoint, fields string) string {
+	return fmt.Sprintf(`
+provider "zyxel" {
+  host = %q
+  username = "fixture-user"
+  password = "fixture-password"
+}
+resource "zyxel_acl_policy" "filters" {
+  name = "policy-filters"
+  rules = [
+    {
+      action = "accept"
+      ip_version = "ipv4"
+      direction = "wan_to_lan"
+      source_cidr = "198.51.100.0/24"
+      destination_cidr = "203.0.113.10/32"
+      %s
+    },
+    {
+      action = "drop"
+      ip_version = "ipv4"
+      direction = "wan_to_lan"
+      source_cidr = "0.0.0.0/0"
+      destination_cidr = "203.0.113.10/32"
+      %s
+    },
+  ]
+}
+`, endpoint, fields, fields)
+}
+
+func TestAccACLPolicy_serviceFiltersReplaceInlineFilters(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	f := newTerraformACLFixture(t)
+	for _, step := range []struct {
+		fields string
+		error  string
+	}{
+		{`protocol = "tcp"
+      service_id = "101"`, "cannot be combined with an inline protocol"},
+		{`service_id = "101"
+      destination_ports = "443"`, "cannot be combined with inline ports"},
+		{`service_id = "101"
+      source_ports = "*"`, "cannot be combined with inline ports"},
+		{"", "Missing inline protocol"},
+	} {
+		step := step
+		resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
+			{Config: policyFilterTestConfig(f.server.URL, step.fields), PlanOnly: true, ExpectError: regexp.MustCompile(step.error)},
+		}})
+	}
+	if f.posts != 0 {
+		t.Fatal("invalid policy configurations reached the router")
+	}
+}
+
 func TestAccACLPolicy_growthShrinkRefreshAndImport(t *testing.T) {
 	if !testingAcceptanceEnabled() {
 		t.Skip("set TF_ACC=1 for local mock acceptance tests")

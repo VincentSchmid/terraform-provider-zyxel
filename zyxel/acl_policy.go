@@ -54,15 +54,24 @@ func (p ACLPolicy) Validate() error {
 		if i < len(p.Rules)-1 && r.Action != "accept" || i == len(p.Rules)-1 && r.Action != "drop" {
 			return errors.New("ACL policy must contain only accepts followed by one final drop")
 		}
+		// ServiceID is a rule parameter that the shared ACL rule write path
+		// resolves and validates; service names, MAC, TCP flag and rate limits
+		// stay unsupported because they cannot describe a shared policy scope.
+		// A resolved service name is only accepted next to the native ID it was
+		// read back with.
+		if (r.Service != "" && r.ServiceID == "") || r.MACAddress != "" || r.TCPFlag != "" || r.RateLimit != nil {
+			return errors.New("ACL policy supports inline filters or a service_id only, without service names, MAC, TCP flag or rate-limit filters")
+		}
 		r.Order = 1
+		r.Service = ""
 		if err := r.validateForWrite(); err != nil {
 			return fmt.Errorf("ACL policy rule %d: %w", i+1, err)
 		}
-		if r.Service != "" || r.ServiceID != "" || r.MACAddress != "" || r.TCPFlag != "" || r.RateLimit != nil {
-			return errors.New("ACL policy supports inline filters only, without services, MAC, TCP flag or rate-limit filters")
+		if r.ServiceID != p.Rules[0].ServiceID {
+			return errors.New("ACL policy rules must share the same service_id")
 		}
 		if !sameACLPolicyScope(r, last) {
-			return errors.New("ACL policy rules must share protocol, address family, direction, destination CIDR and port filters")
+			return errors.New("ACL policy rules must share protocol, address family, direction, destination CIDR, port and service filters")
 		}
 	}
 	anySource := "0.0.0.0/0"

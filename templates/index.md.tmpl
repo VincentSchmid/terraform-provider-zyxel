@@ -112,7 +112,9 @@ replacement safety and examples.
 An ordered accept collection followed by one catch-all drop needs
 `zyxel_acl_policy`: individual `zyxel_acl_rule` resources cannot maintain that
 drop across collection changes, even with `depends_on` or `-parallelism=1`.
-Read [ACL ordering, limitations and recovery](guides/acl-ordering-recovery.md)
+Policy rules share one traffic scope and can reference a custom `service_id`
+instead of an inline `protocol` and ports. Read
+[ACL ordering, limitations and recovery](guides/acl-ordering-recovery.md)
 before using policies, migrating rows or retrying partial applies.
 
 {{ .SchemaMarkdown | trimspace }}
