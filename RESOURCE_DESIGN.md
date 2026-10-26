@@ -250,12 +250,41 @@ orders, earlier drop rules, unmanaged entries, and external configuration
 changes still matter. Terraform `depends_on` controls operation sequencing,
 not router evaluation order or cross-process coordination.
 
-`zyxel_acl_policy` separately owns a contiguous ACL tail of equivalent-scope
-accepts and a final catch-all-source drop. It stages complete generations and
-verifies the replacement drop before removing old accepts and the old drop.
-See the architecture decision and [ordering/recovery guide](docs/guides/acl-ordering-recovery.md)
-for scope restrictions, partial ledgers, non-atomic transition semantics and
-explicit import. It uses no ACL PUT or reorder operation.
+`zyxel_acl_policy` separately owns a contiguous ACL tail as two ordered lists:
+`rules` holds accepts and `drop_rules` holds drops/rejects. The effective order
+is every accept, then every drop/reject, and at least one drop/reject is
+required. Rules are validated independently, so heterogeneous protocols,
+services, address families, directions, destinations, ports, MAC filters and
+rate limits are allowed; `service_id` is per rule. It stages complete
+generations and verifies the replacement drops before removing old accepts and
+old drops/rejects. See the architecture decision and
+[ordering/recovery guide](docs/guides/acl-ordering-recovery.md) for the tail
+restriction, partial ledgers, non-atomic transition semantics and explicit
+import. It uses no ACL PUT or reorder operation.
+
+### Observed firmware ordering limits
+
+Live attempts on the AX7501-B0 established three constraints that rule out
+independent, order-bearing ACL resources:
+
+- **Order is a position, not a declarative slot.** POSTing order 3 onto a
+  one-row table clamps to position 2; the readback differs from the request.
+  A position cannot be reserved for a later insert.
+- **Deletes compact the table.** Remaining rows renumber, so a stored `order`
+  drifts after unrelated deletions. Treating the number as durable state
+  requires `ignore_changes` and still cannot express insertion.
+- **There is no verified insertion or reorder primitive.** The provider has only
+  POST and DELETE. A requested order is not an insertion instruction, and the
+  web UI's reorder behavior has not been captured as a DAL contract.
+
+Therefore independent `zyxel_acl_rule` resources cannot enforce an order among
+themselves: Terraform does not sequence independent resources, and the firmware
+does not hold requested positions. The only ordering mechanism with a coherent
+unit of ownership is the policy's staged tail. `zyxel_acl_rule` remains useful
+for static, fully known sets where each row's position does not need to be
+coordinated with a changing feed; dynamic lists (for example Cloudflare ranges)
+belong in `zyxel_acl_policy`, which appends one complete generation behind the
+old tail, verifies it, and retires the old generation.
 
 Local encrypted mock tests and real Terraform tests cover the modeled API,
 field replacement, import, disappearance, index changes, conflicting orders,

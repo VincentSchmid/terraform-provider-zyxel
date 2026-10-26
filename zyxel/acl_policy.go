@@ -11,9 +11,10 @@ import (
 	"strings"
 )
 
-// ACLPolicy owns a contiguous tail of the ACL table. Rules are ordered accepts
-// followed by one enabled, unrestricted-source drop covering the same filters.
-// Names in Rules are logical names; the API creates generation-qualified names.
+// ACLPolicy owns a contiguous tail of the ACL table. Rules is the effective
+// evaluation order: zero or more accepts followed by one or more drops/rejects.
+// Rules may use different scopes. Names in Rules are logical names; the API
+// creates generation-qualified names.
 type ACLPolicy struct {
 	Name  string
 	Rules []ACLRule
@@ -33,16 +34,20 @@ type ACLPolicyOutcome struct {
 	Changed bool
 }
 
-// Validate checks the deliberately restricted policy shape without networking.
+// Validate checks the policy shape without networking. Accepts must precede
+// every drop/reject, and at least one drop/reject is required, so the managed
+// tail always ends in explicit protection. Each rule is validated on its own;
+// rules may have different scopes.
 func (p ACLPolicy) Validate() error {
 	if strings.TrimSpace(p.Name) != p.Name || p.Name == "" || len(p.Name) > 48 {
 		return errors.New("ACL policy name must be 1-48 bytes without surrounding whitespace")
 	}
 	if len(p.Rules) < 1 || len(p.Rules) > 999 {
-		return errors.New("ACL policy requires 1-999 rules, ending in a catch-all drop")
+		return errors.New("ACL policy requires 1-999 rules, including at least one drop or reject")
 	}
 	seen := map[string]bool{}
-	last := p.Rules[len(p.Rules)-1]
+	dropped := false
+	drops := 0
 	for i, r := range p.Rules {
 		if seen[r.Name] || strings.TrimSpace(r.Name) != r.Name || r.Name == "" {
 			return errors.New("ACL policy logical rule names must be unique and non-empty without surrounding whitespace")
@@ -51,49 +56,32 @@ func (p ACLPolicy) Validate() error {
 		if r.Order != 0 || r.OrderMode != "" || !r.Enabled {
 			return errors.New("ACL policy rules must be enabled and must omit order and order mode")
 		}
-		if i < len(p.Rules)-1 && r.Action != "accept" || i == len(p.Rules)-1 && r.Action != "drop" {
-			return errors.New("ACL policy must contain only accepts followed by one final drop")
+		switch r.Action {
+		case "accept":
+			if dropped {
+				return errors.New("ACL policy accepts must precede every drop or reject rule")
+			}
+		case "drop", "reject":
+			dropped = true
+			drops++
+		default:
+			return fmt.Errorf("ACL policy rule %d has unsupported action %q", i+1, r.Action)
 		}
-		// ServiceID is a rule parameter that the shared ACL rule write path
-		// resolves and validates; service names, MAC, TCP flag and rate limits
-		// stay unsupported because they cannot describe a shared policy scope.
-		// A resolved service name is only accepted next to the native ID it was
-		// read back with.
-		if (r.Service != "" && r.ServiceID == "") || r.MACAddress != "" || r.TCPFlag != "" || r.RateLimit != nil {
-			return errors.New("ACL policy supports inline filters or a service_id only, without service names, MAC, TCP flag or rate-limit filters")
+		r.Order, r.OrderMode = 1, ""
+		// Readback carries the resolved service name next to the native ID it
+		// was read with. The write path resolves the ID and must not also send a
+		// name; the adapter rejects both on input.
+		if r.ServiceID != "" {
+			r.Service = ""
 		}
-		r.Order = 1
-		r.Service = ""
 		if err := r.validateForWrite(); err != nil {
 			return fmt.Errorf("ACL policy rule %d: %w", i+1, err)
 		}
-		if r.ServiceID != p.Rules[0].ServiceID {
-			return errors.New("ACL policy rules must share the same service_id")
-		}
-		if !sameACLPolicyScope(r, last) {
-			return errors.New("ACL policy rules must share protocol, address family, direction, destination CIDR, port and service filters")
-		}
 	}
-	anySource := "0.0.0.0/0"
-	if last.IPVersion == "ipv6" {
-		anySource = "::/0"
-	}
-	if last.SourceCIDR != anySource {
-		return errors.New("final ACL policy drop must match any source in its address family")
+	if drops == 0 {
+		return errors.New("ACL policy requires at least one drop or reject rule")
 	}
 	return nil
-}
-
-func sameACLPolicyScope(a, b ACLRule) bool {
-	_ = a.expandPorts()
-	_ = b.expandPorts()
-	a.Name, b.Name = "scope", "scope"
-	a.Action, b.Action = "drop", "drop"
-	a.Order, b.Order = 1, 1
-	a.SourceCIDR, b.SourceCIDR = "0.0.0.0/0", "0.0.0.0/0"
-	a.RateLimit, b.RateLimit = nil, nil
-	a.RateLimitUnit, b.RateLimitUnit = "minute", "minute"
-	return len(aclRuleDifferences(a, b)) == 0
 }
 
 func aclPolicyPrefix(name string) string { return name + "-g" }
@@ -111,9 +99,10 @@ func policyGeneration() (string, error) {
 }
 
 // ApplyACLPolicy stages a complete new tail behind the old drop, verifies it,
-// then removes the old accepts and finally its drop. It never uses PUT/reorder.
-// Updates cannot change the traffic scope. Partial failures require operator
-// reconciliation; do not retry without inspecting the returned ownership ledger.
+// then removes the old accepts and finally its drops/rejects. It never uses
+// PUT/reorder. Any rule may change, including its traffic scope. Partial
+// failures require operator reconciliation; do not retry without inspecting the
+// returned ownership ledger.
 func (c *Client) ApplyACLPolicy(ctx context.Context, desired ACLPolicy, previous *ACLPolicyState) (ACLPolicyOutcome, error) {
 	var out ACLPolicyOutcome
 	if previous != nil {
@@ -131,11 +120,6 @@ func (c *Client) ApplyACLPolicy(ctx context.Context, desired ACLPolicy, previous
 		prefix, err := inspectACLPolicyTable(rows, desired.Name, previous)
 		if err != nil {
 			return err
-		}
-		if previous != nil {
-			if !sameACLPolicyScope(desired.Rules[len(desired.Rules)-1], previous.Rules[len(previous.Rules)-1]) {
-				return errors.New("ACL policy scope changes are unsupported; review a separate migration before writes")
-			}
 		}
 		generation, err := policyGeneration()
 		if err != nil {
@@ -400,8 +384,9 @@ func (c *Client) ImportACLPolicy(ctx context.Context, name, generation string) (
 	return state, err
 }
 
-// DeleteACLPolicy deletes only exact tracked names, with all drops last. It can
-// clean up a partial staging ledger, but never discovers/adopts untracked rows.
+// DeleteACLPolicy deletes only exact tracked names, with every drop/reject last.
+// It can clean up a partial staging ledger, but never discovers/adopts
+// untracked rows.
 func (c *Client) DeleteACLPolicy(ctx context.Context, state ACLPolicyState) error {
 	return c.withSession(ctx, func(s *routerSession) error {
 		rows, err := s.readACLRows(ctx)

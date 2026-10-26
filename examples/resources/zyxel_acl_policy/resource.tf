@@ -13,23 +13,28 @@ locals {
   }
 }
 
-# Review unrelated prefix accepts for overlap before creating this tail policy.
-# Do not create a separate catch-all drop or manage generated rows individually.
+# Accepts are evaluated in list order, then every drop rule. At least one drop
+# rule is required. Review unrelated prefix accepts for overlap before creating
+# this tail policy. Do not manage generated rows individually.
 resource "zyxel_acl_policy" "https" {
   name = "HTTPS-Sources"
-  rules = concat([
+
+  rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
       action      = "accept"
       source_cidr = cidr
     })
-    ], [merge(local.https_filter, {
-      action      = "drop"
-      source_cidr = "0.0.0.0/0"
-  })])
+  ]
+
+  drop_rules = [merge(local.https_filter, {
+    action      = "drop"
+    source_cidr = "0.0.0.0/0"
+  })]
 }
 
-# A custom service replaces the inline protocol and port filters for every rule.
-# The computed protocol is then "all" and the service selects protocol and ports.
+# A custom service replaces the inline protocol and port filters. Each rule can
+# reference its own service name or service_id; rules no longer have to share one
+# scope.
 resource "zyxel_service" "https" {
   name              = "policy-https"
   protocol          = "tcp"
@@ -48,13 +53,54 @@ locals {
 
 resource "zyxel_acl_policy" "https_service" {
   name = "HTTPS-Service-Sources"
-  rules = concat([
+
+  rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
       action      = "accept"
       source_cidr = cidr
     })
-    ], [merge(local.service_filter, {
-      action      = "drop"
-      source_cidr = "0.0.0.0/0"
-  })])
+  ]
+
+  drop_rules = [merge(local.service_filter, {
+    action      = "drop"
+    source_cidr = "0.0.0.0/0"
+  })]
+}
+
+# Mixed-scope accepts are allowed; one or more drops follow them. The effective
+# order is the accept list, then the drop list.
+resource "zyxel_acl_policy" "mixed" {
+  name = "Mixed-Services"
+
+  rules = [
+    {
+      action            = "accept"
+      protocol          = "tcp"
+      ip_version        = "ipv4"
+      direction         = "wan_to_lan"
+      source_cidr       = "0.0.0.0/0"
+      destination_cidr  = "203.0.113.20/32"
+      destination_ports = "5006"
+    },
+    {
+      action            = "accept"
+      protocol          = "udp"
+      ip_version        = "ipv4"
+      direction         = "wan_to_lan"
+      source_cidr       = "0.0.0.0/0"
+      destination_cidr  = "203.0.113.20/32"
+      destination_ports = "1194"
+    },
+  ]
+
+  drop_rules = [
+    {
+      action           = "drop"
+      protocol         = "all"
+      ip_version       = "ipv4"
+      direction        = "wan_to_lan"
+      source_cidr      = "0.0.0.0/0"
+      destination_cidr = "0.0.0.0/0"
+    },
+  ]
 }
