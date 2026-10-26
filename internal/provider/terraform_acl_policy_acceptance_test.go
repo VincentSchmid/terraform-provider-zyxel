@@ -23,7 +23,7 @@ provider "zyxel" {
 }
 resource "zyxel_acl_policy" "https" {
   name = "policy-https"
-  rules = concat([
+  rules = [
     for cidr in %s : {
       action = "accept"
       protocol = "tcp"
@@ -33,7 +33,8 @@ resource "zyxel_acl_policy" "https" {
       destination_cidr = "203.0.113.10/32"
       destination_ports = "443"
     }
-  ], [{
+  ]
+  drop_rules = [{
     action = "drop"
     protocol = "tcp"
     ip_version = "ipv4"
@@ -41,7 +42,7 @@ resource "zyxel_acl_policy" "https" {
     source_cidr = "0.0.0.0/0"
     destination_cidr = "203.0.113.10/32"
     destination_ports = "443"
-  }])
+  }]
 }
 `, endpoint, sources)
 }
@@ -61,7 +62,7 @@ resource "zyxel_service" "https" {
 }
 resource "zyxel_acl_policy" "service" {
   name = "policy-service"
-  rules = concat([
+  rules = [
     for cidr in %s : {
       action = "accept"
       ip_version = "ipv4"
@@ -70,14 +71,15 @@ resource "zyxel_acl_policy" "service" {
       destination_cidr = "203.0.113.10/32"
       service_id = zyxel_service.https.id
     }
-  ], [{
+  ]
+  drop_rules = [{
     action = "drop"
     ip_version = "ipv4"
     direction = "wan_to_lan"
     source_cidr = "0.0.0.0/0"
     destination_cidr = "203.0.113.10/32"
     service_id = zyxel_service.https.id
-  }])
+  }]
 }
 `, endpoint, sources)
 }
@@ -92,7 +94,7 @@ func TestAccACLPolicy_serviceRules(t *testing.T) {
 		{Config: config, ConfigStateChecks: []statecheck.StateCheck{
 			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("protocol"), knownvalue.StringExact("all")),
 			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("service_id"), knownvalue.StringExact("101")),
-			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("rules").AtSliceIndex(1).AtMapKey("destination_ports"), knownvalue.Null()),
+			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("drop_rules").AtSliceIndex(0).AtMapKey("destination_ports"), knownvalue.Null()),
 		}},
 		{Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 		{ResourceName: "zyxel_acl_policy.service", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "name", ImportStateIdFunc: func(*terraform.State) (string, error) {
@@ -106,7 +108,7 @@ func TestAccACLPolicy_serviceRules(t *testing.T) {
 				if index := fixtureInt(row["X_ZYXEL_ServiceIndex"]); index != 101 {
 					return "", fmt.Errorf("policy row %q does not reference the service: %d", name, index)
 				}
-				return "policy-service/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-service-g"), "-001"), nil
+				return "policy-service/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-service-g"), "-01"), nil
 			}
 			return "", fmt.Errorf("no policy generation found")
 		}},
@@ -134,6 +136,8 @@ resource "zyxel_acl_policy" "filters" {
       destination_cidr = "203.0.113.10/32"
       %s
     },
+  ]
+  drop_rules = [
     {
       action = "drop"
       ip_version = "ipv4"
@@ -198,7 +202,7 @@ func TestAccACLPolicy_growthShrinkRefreshAndImport(t *testing.T) {
 			defer f.mu.Unlock()
 			for _, row := range f.rows {
 				if name, ok := row["Name"].(string); ok && strings.HasPrefix(name, "policy-https-g") {
-					return "policy-https/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-https-g"), "-001"), nil
+					return "policy-https/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-https-g"), "-01"), nil
 				}
 			}
 			return "", fmt.Errorf("no policy generation found")

@@ -100,22 +100,26 @@ an explicit architecture decision, documentation update, and matching tests.
 
 ### Ordered ACL Policy Decision
 
-`zyxel_acl_policy` owns a contiguous tail with equivalent-scope accepts followed
-by an enabled catch-all-source drop. It reuses verified single-row POST/DELETE,
-not an undocumented reorder API. Updates stage and verify a complete new
-generation behind the old drop, then retire old accepts before the old drop.
-The staged drop exists before the old drop is removed. All steps run under the
-endpoint session lock; partial/ambiguous outcomes retain an exact ownership
-ledger and stop for operator reconciliation. Existing namespace rows require
-explicit import; prefix matches never confer ownership during create.
+`zyxel_acl_policy` owns a contiguous tail as two ordered lists: `rules`
+(accepts) and `drop_rules` (drops/rejects). The effective order is every accept,
+then every drop/reject; at least one drop/reject is required. Rules are validated
+independently, so they may use different protocols, services, address families,
+directions, destinations, ports, MAC filters and rate limits. It reuses verified
+single-row POST/DELETE, not an undocumented reorder API. Updates stage and verify
+a complete new generation behind the old tail, then retire old accepts before
+old drops/rejects. All steps run under the endpoint session lock; partial or
+ambiguous outcomes retain an exact ownership ledger and stop for operator
+reconciliation. Existing namespace rows require explicit import; prefix matches
+never confer ownership during create.
 
-This is a restricted policy reconciler, not arbitrary ordered firewall rules or
-an atomic transaction. Traffic scope changes are rejected. All rules share
-destination, protocol, address family, direction and port filters. Unrelated
+This is a restricted tail reconciler, not an atomic transaction. Unrelated
 prefix rows must be accepts; operators must ensure these do not bypass the
-policy. Temporary loss of access and delayed revocation are possible while old
-accepts retire. Out-of-process writers remain unsupported during operations.
-Destroy deliberately removes policy protection, deleting terminal drops last.
+policy drops. A staged accept outside the old terminal drop's scope can take
+effect before verification, so a catch-all terminal drop is recommended when
+that matters. Temporary loss of access, overlap of old and new scopes, and
+delayed revocation are possible while old rules retire. Out-of-process writers
+remain unsupported during operations. Destroy deliberately removes policy
+protection, deleting every non-accept last.
 
 ## Development Pattern
 

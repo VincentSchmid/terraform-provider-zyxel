@@ -97,7 +97,7 @@ processes and UI users are not coordinated by the process-local lock.
 | `zyxel_dhcp_reservation` | resource | Enabled static DHCP reservation by MAC address |
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
 | `zyxel_acl_rule` | resource | Firewall ACL entry with IPv4/IPv6, protocol, MAC, service, TCP flag, direction, and rate-limit filters |
-| `zyxel_acl_policy` | resource | Ordered accept collection plus trailing drop, with staged generation updates |
+| `zyxel_acl_policy` | resource | Ordered accept list plus required drop/reject list, with staged generation updates |
 | `zyxel_service` | resource | Reusable firewall protocol/service object referenced by ACL ID |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
 | `zyxel_interface_group` | resource | Port-based interface groups, referenced by exact-name ID |
@@ -230,16 +230,20 @@ position without numeric-order drift. Appending accepts behind enabled
 drop/reject rules is conservatively refused. A separate drop plus `depends_on`
 does not support adding accepts after that drop already exists.
 
-For a dynamic accept collection followed by a drop, use `zyxel_acl_policy` with
-an ordered `rules` list; see [the example](examples/resources/zyxel_acl_policy/resource.tf).
-Policy rules may also set a shared `service_id` instead of an inline `protocol`
-and ports; those rows are created through the same ACL rule write path.
-It stages and verifies a new generation behind the old drop before retiring old
-accepts and finally the old drop. This supports collection growth/shrink without
-an undocumented router reorder operation. It is restricted to a common traffic
-scope, is not atomic, temporarily needs capacity for both generations, and can
-interrupt traffic. Initial creation has no previous policy protection. All live
-hardware writes remain unverified. Review the unrelated prefix for broad accepts.
+For a dynamic accept list followed by drops/rejects, use `zyxel_acl_policy`
+with ordered `rules` and required `drop_rules`; see
+[the example](examples/resources/zyxel_acl_policy/resource.tf). The effective
+order is every accept, then every drop/reject, so accepts can never follow a
+deny. Each rule may set its own `service` name or `service_id` instead of an
+inline `protocol` and ports; those rows are created through the same ACL rule
+write path.
+It stages and verifies a new generation behind the old tail before retiring old
+accepts and finally the old drops/rejects. This supports collection growth and
+shrink without an undocumented router reorder operation. It still owns only a
+contiguous table tail, is not atomic, temporarily needs capacity for both
+generations, and can interrupt traffic. Initial creation has no previous policy
+protection. All live hardware writes remain unverified. Review the unrelated
+prefix for broad accepts.
 
 Read [ACL ordering, limitations and recovery](docs/guides/acl-ordering-recovery.md)
 before migration or retrying partial/tainted creates. Existing rows are never

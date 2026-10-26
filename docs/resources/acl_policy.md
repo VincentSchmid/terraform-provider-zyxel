@@ -3,12 +3,12 @@
 page_title: "zyxel_acl_policy Resource - zyxel"
 subcategory: ""
 description: |-
-  Manages an ordered ACL tail: enabled equivalent-scope accepts followed by one catch-all source drop. The list is reconciled sequentially under a process-local endpoint lock. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally the old drop. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Only source ranges and accept-list order/size can change in place; traffic-scope changes are rejected. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
+  Manages the ordered ACL tail for a router. rules holds accepts; drop_rules holds the drops/rejects applied after every accept. The effective order is every rules entry in list order, then every drop_rules entry in list order. At least one drop/reject is required. Migrating from the earlier single-list shape means moving the former final drop from rules to drop_rules; existing state remains readable and no state upgrader is used. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
 ---
 
 # zyxel_acl_policy (Resource)
 
-Manages an ordered ACL tail: enabled equivalent-scope accepts followed by one catch-all source drop. The list is reconciled sequentially under a process-local endpoint lock. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally the old drop. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Only source ranges and accept-list order/size can change in place; traffic-scope changes are rejected. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
+Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. Migrating from the earlier single-list shape means moving the former final `drop` from `rules` to `drop_rules`; existing state remains readable and no state upgrader is used. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
 
 ## Example Usage
 
@@ -28,23 +28,28 @@ locals {
   }
 }
 
-# Review unrelated prefix accepts for overlap before creating this tail policy.
-# Do not create a separate catch-all drop or manage generated rows individually.
+# Accepts are evaluated in list order, then every drop rule. At least one drop
+# rule is required. Review unrelated prefix accepts for overlap before creating
+# this tail policy. Do not manage generated rows individually.
 resource "zyxel_acl_policy" "https" {
   name = "HTTPS-Sources"
-  rules = concat([
+
+  rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
       action      = "accept"
       source_cidr = cidr
     })
-    ], [merge(local.https_filter, {
-      action      = "drop"
-      source_cidr = "0.0.0.0/0"
-  })])
+  ]
+
+  drop_rules = [merge(local.https_filter, {
+    action      = "drop"
+    source_cidr = "0.0.0.0/0"
+  })]
 }
 
-# A custom service replaces the inline protocol and port filters for every rule.
-# The computed protocol is then "all" and the service selects protocol and ports.
+# A custom service replaces the inline protocol and port filters. Each rule can
+# reference its own service name or service_id; rules no longer have to share one
+# scope.
 resource "zyxel_service" "https" {
   name              = "policy-https"
   protocol          = "tcp"
@@ -63,15 +68,56 @@ locals {
 
 resource "zyxel_acl_policy" "https_service" {
   name = "HTTPS-Service-Sources"
-  rules = concat([
+
+  rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
       action      = "accept"
       source_cidr = cidr
     })
-    ], [merge(local.service_filter, {
-      action      = "drop"
-      source_cidr = "0.0.0.0/0"
-  })])
+  ]
+
+  drop_rules = [merge(local.service_filter, {
+    action      = "drop"
+    source_cidr = "0.0.0.0/0"
+  })]
+}
+
+# Mixed-scope accepts are allowed; one or more drops follow them. The effective
+# order is the accept list, then the drop list.
+resource "zyxel_acl_policy" "mixed" {
+  name = "Mixed-Services"
+
+  rules = [
+    {
+      action            = "accept"
+      protocol          = "tcp"
+      ip_version        = "ipv4"
+      direction         = "wan_to_lan"
+      source_cidr       = "0.0.0.0/0"
+      destination_cidr  = "203.0.113.20/32"
+      destination_ports = "5006"
+    },
+    {
+      action            = "accept"
+      protocol          = "udp"
+      ip_version        = "ipv4"
+      direction         = "wan_to_lan"
+      source_cidr       = "0.0.0.0/0"
+      destination_cidr  = "203.0.113.20/32"
+      destination_ports = "1194"
+    },
+  ]
+
+  drop_rules = [
+    {
+      action           = "drop"
+      protocol         = "all"
+      ip_version       = "ipv4"
+      direction        = "wan_to_lan"
+      source_cidr      = "0.0.0.0/0"
+      destination_cidr = "0.0.0.0/0"
+    },
+  ]
 }
 ```
 
@@ -80,32 +126,64 @@ resource "zyxel_acl_policy" "https_service" {
 
 ### Required
 
-- `name` (String) Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-001, -002, etc. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.
-- `rules` (Attributes List) Ordered list of 1-999 rules. All must share protocol (or service), address family, direction, destination and port filters. Only accepts may precede the final drop, whose source must be 0.0.0.0/0 (or ::/0). All rules are enabled. No numeric order is configured. (see [below for nested schema](#nestedatt--rules))
+- `drop_rules` (Attributes List) Ordered drop/reject rules, evaluated after every accept. Each entry must have `action = "drop"` or `"reject"`; at least one entry is required so a policy cannot silently omit its deny coverage. Rules may have different scopes. (see [below for nested schema](#nestedatt--drop_rules))
+- `name` (String) Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-01, -02, etc.; three-digit suffixes from v2 providers remain readable. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.
+
+### Optional
+
+- `rules` (Attributes List) Ordered accept rules, evaluated before every entry in `drop_rules`. Each entry must have `action = "accept"`. Rules may have different protocols, services, address families, directions, destinations and ports. No numeric order is configured. (see [below for nested schema](#nestedatt--rules))
 
 ### Read-Only
 
 - `generation` (String) Current generation token. Together with row_names this is a recovery ledger, not permission to adopt matching rows.
-- `observed_orders` (List of Number) Observed positions in rule-list order. Firmware compaction refreshes these values without changes to the configured list.
-- `row_names` (List of String) Exact router names owned by this resource, including accepted/ambiguous writes after partial failures. Never edit or discard this ledger without operator reconciliation.
+- `observed_orders` (List of Number) Observed positions in effective rule order (accepts, then drops/rejects). Firmware compaction refreshes these values without changes to the configured lists.
+- `row_names` (List of String) Exact router names owned by this resource, in effective rule order, including accepted/ambiguous writes after partial failures. Never edit or discard this ledger without operator reconciliation.
+
+<a id="nestedatt--drop_rules"></a>
+### Nested Schema for `drop_rules`
+
+Required:
+
+- `action` (String) `accept` in `rules`; `drop` or `reject` in `drop_rules`.
+- `destination_cidr` (String) Canonical destination network in the selected address family.
+- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
+- `ip_version` (String) ipv4 or ipv6.
+- `source_cidr` (String) Canonical source network in the selected address family.
+
+Optional:
+
+- `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
+- `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
+- `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
+- `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
+- `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
+- `service` (String) Name of an existing custom protocol/service group. Mutually exclusive with `service_id` and inline protocol/port/TCP-flag filters.
+- `service_id` (String) Native custom service ID, for example `zyxel_service.https.id`. Mutually exclusive with `service` and inline protocol/port/TCP-flag filters. The router rows are created through the same ACL rule write path.
+- `source_ports` (String) Source ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
+- `tcp_flag` (String) Optional TCP flag to match. Only valid with the `tcp` and `tcp_udp` protocols.
 
 <a id="nestedatt--rules"></a>
 ### Nested Schema for `rules`
 
 Required:
 
-- `action` (String) accept, except for the final rule which must be drop.
-- `destination_cidr` (String) Canonical destination network shared by all rules.
+- `action` (String) `accept` in `rules`; `drop` or `reject` in `drop_rules`.
+- `destination_cidr` (String) Canonical destination network in the selected address family.
 - `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
 - `ip_version` (String) ipv4 or ipv6.
-- `source_cidr` (String) Canonical source network; the final drop must match any source.
+- `source_cidr` (String) Canonical source network in the selected address family.
 
 Optional:
 
-- `destination_ports` (String) Inline destination ports: *, a port, or start-end. Omit for any. For portless protocols or with `service_id` omit this field.
-- `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service_id` is set; the neutral `all` value is then computed and the service selects the protocol.
-- `service_id` (String) Native custom service ID, for example `zyxel_service.https.id`, shared by all rules. Mutually exclusive with inline `protocol`, `source_ports` and `destination_ports`; the router rows are created through the same ACL rule write path.
-- `source_ports` (String) Inline source ports: *, a port, or start-end. Omit for any. For portless protocols or with `service_id` omit this field.
+- `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
+- `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
+- `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
+- `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
+- `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
+- `service` (String) Name of an existing custom protocol/service group. Mutually exclusive with `service_id` and inline protocol/port/TCP-flag filters.
+- `service_id` (String) Native custom service ID, for example `zyxel_service.https.id`. Mutually exclusive with `service` and inline protocol/port/TCP-flag filters. The router rows are created through the same ACL rule write path.
+- `source_ports` (String) Source ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
+- `tcp_flag` (String) Optional TCP flag to match. Only valid with the `tcp` and `tcp_udp` protocols.
 
 ## Import
 

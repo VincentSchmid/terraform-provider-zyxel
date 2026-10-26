@@ -2,11 +2,14 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
 
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -43,9 +46,11 @@ func TestACLPolicyModelPassesServiceRuleParameters(t *testing.T) {
 			SourcePorts: types.StringNull(), DestinationPorts: types.StringNull(),
 		}
 	}
-	model := aclPolicyModel{Name: types.StringValue("policy"), Rules: []aclPolicyRuleModel{
-		rule("accept", "198.51.100.0/24"), rule("drop", "0.0.0.0/0"),
-	}}
+	model := aclPolicyModel{
+		Name:      types.StringValue("policy"),
+		Rules:     []aclPolicyRuleModel{rule("accept", "198.51.100.0/24")},
+		DropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")},
+	}
 	p, known := modelACLPolicy(model)
 	if !known {
 		t.Fatal("service policy rules must be known before writes")
@@ -61,6 +66,144 @@ func TestACLPolicyModelPassesServiceRuleParameters(t *testing.T) {
 	model.Rules[0].ServiceID = types.StringUnknown()
 	if _, known := modelACLPolicy(model); known {
 		t.Fatal("unknown service_id must block the write")
+	}
+}
+
+func TestACLPolicyModelDefaultsProtocolForBothServiceForms(t *testing.T) {
+	base := func(action, source string) aclPolicyRuleModel {
+		return aclPolicyRuleModel{
+			Action: types.StringValue(action), Protocol: types.StringNull(),
+			Service: types.StringNull(), ServiceID: types.StringNull(),
+			IPVersion: types.StringValue("ipv4"), Direction: types.StringValue("wan_to_lan"),
+			SourceCIDR: types.StringValue(source), DestinationCIDR: types.StringValue("203.0.113.10/32"),
+			SourcePorts: types.StringNull(), DestinationPorts: types.StringNull(),
+			MACAddress: types.StringNull(), TCPFlag: types.StringNull(),
+			PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringNull(),
+		}
+	}
+	byName := base("accept", "198.51.100.0/24")
+	byName.Service = types.StringValue("https")
+	byID := base("accept", "192.0.2.0/24")
+	byID.ServiceID = types.StringValue("101")
+	inline := base("drop", "0.0.0.0/0")
+	inline.Protocol = types.StringValue("udp")
+	inline.DestinationPorts = types.StringValue("1194")
+
+	model := aclPolicyModel{
+		Name:      types.StringValue("policy"),
+		Rules:     []aclPolicyRuleModel{byName, byID},
+		DropRules: []aclPolicyRuleModel{inline},
+	}
+	p, known := modelACLPolicy(model)
+	if !known {
+		t.Fatal("policy with known service rules reported unknown")
+	}
+	if got := []string{p.Rules[0].Protocol, p.Rules[1].Protocol, p.Rules[2].Protocol}; got[0] != "all" || got[1] != "all" || got[2] != "udp" {
+		t.Fatalf("service rules must compute all: %v", got)
+	}
+	if p.Rules[0].Service != "https" || p.Rules[1].ServiceID != "101" {
+		t.Fatalf("per-rule service selection lost: %#v", p.Rules)
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestACLPolicyModelKeepsAcceptsBeforeDrops(t *testing.T) {
+	base := func(action string) aclPolicyRuleModel {
+		return aclPolicyRuleModel{
+			Action: types.StringValue(action), Protocol: types.StringValue("udp"),
+			IPVersion: types.StringValue("ipv4"), Direction: types.StringValue("wan_to_lan"),
+			SourceCIDR: types.StringValue("0.0.0.0/0"), DestinationCIDR: types.StringValue("203.0.113.10/32"),
+			Service: types.StringNull(), ServiceID: types.StringNull(),
+			SourcePorts: types.StringNull(), DestinationPorts: types.StringValue("1194"),
+			MACAddress: types.StringValue("AA:BB:CC:DD:EE:FF"), TCPFlag: types.StringNull(),
+			PacketsPerUnit: types.Int64Value(10), RateLimitUnit: types.StringValue("second"),
+		}
+	}
+	accept := base("accept")
+	drop := base("drop")
+	drop.PacketsPerUnit, drop.RateLimitUnit = types.Int64Null(), types.StringNull()
+	model := aclPolicyModel{
+		Name:      types.StringValue("policy"),
+		Rules:     []aclPolicyRuleModel{accept},
+		DropRules: []aclPolicyRuleModel{drop},
+	}
+	p, known := modelACLPolicy(model)
+	if !known {
+		t.Fatal("known policy reported unknown")
+	}
+	if len(p.Rules) != 2 || p.Rules[0].Action != "accept" || p.Rules[1].Action != "drop" {
+		t.Fatalf("accepts must precede drops: %#v", p.Rules)
+	}
+	if p.Rules[0].MACAddress != "AA:BB:CC:DD:EE:FF" || p.Rules[0].RateLimit == nil || *p.Rules[0].RateLimit != 10 || p.Rules[0].RateLimitUnit != "second" {
+		t.Fatalf("per-rule filters lost: %#v", p.Rules[0])
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestACLPolicyValidateConfigAcceptsSeparateRuleLists(t *testing.T) {
+	ctx := context.Background()
+	var schemaResp resource.SchemaResponse
+	(&ACLPolicyResource{}).Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	if schemaResp.Diagnostics.HasError() {
+		t.Fatal(schemaResp.Diagnostics)
+	}
+	rule := func(action, source string) aclPolicyRuleModel {
+		return aclPolicyRuleModel{
+			Action: types.StringValue(action), Protocol: types.StringValue("tcp"),
+			Service: types.StringNull(), ServiceID: types.StringNull(),
+			IPVersion: types.StringValue("ipv4"), Direction: types.StringValue("wan_to_lan"),
+			SourceCIDR: types.StringValue(source), DestinationCIDR: types.StringValue("203.0.113.10/32"),
+			SourcePorts: types.StringNull(), DestinationPorts: types.StringValue("443"),
+			MACAddress: types.StringNull(), TCPFlag: types.StringNull(),
+			PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringNull(),
+		}
+	}
+	for _, test := range []struct {
+		name      string
+		rules     []aclPolicyRuleModel
+		dropRules []aclPolicyRuleModel
+		invalid   bool
+	}{
+		{name: "accepts then drops", rules: []aclPolicyRuleModel{rule("accept", "198.51.100.0/24")}, dropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")}},
+		{name: "drops only", dropRules: []aclPolicyRuleModel{rule("reject", "0.0.0.0/0")}},
+		{name: "drop in rules", rules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")}, dropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")}, invalid: true},
+		{name: "accept in drop_rules", rules: []aclPolicyRuleModel{rule("accept", "198.51.100.0/24")}, dropRules: []aclPolicyRuleModel{rule("accept", "0.0.0.0/0")}, invalid: true},
+		{name: "no drop", rules: []aclPolicyRuleModel{rule("accept", "198.51.100.0/24")}, invalid: true},
+		{name: "inline without protocol", rules: []aclPolicyRuleModel{func() aclPolicyRuleModel {
+			r := rule("accept", "198.51.100.0/24")
+			r.Protocol = types.StringNull()
+			return r
+		}()}, dropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")}, invalid: true},
+		{name: "service without protocol", rules: []aclPolicyRuleModel{func() aclPolicyRuleModel {
+			r := rule("accept", "198.51.100.0/24")
+			r.Protocol, r.DestinationPorts, r.Service = types.StringNull(), types.StringNull(), types.StringValue("https")
+			return r
+		}()}, dropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")}},
+		{name: "service_id without protocol", rules: []aclPolicyRuleModel{func() aclPolicyRuleModel {
+			r := rule("accept", "198.51.100.0/24")
+			r.Protocol, r.DestinationPorts, r.ServiceID = types.StringNull(), types.StringNull(), types.StringValue("101")
+			return r
+		}()}, dropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := aclPolicyModel{
+				Name: types.StringValue("policy"), Rules: test.rules, DropRules: test.dropRules,
+				Generation: types.StringNull(), RowNames: types.ListNull(types.StringType), ObservedOrders: types.ListNull(types.Int64Type),
+			}
+			plan := tfsdk.Plan{Schema: schemaResp.Schema}
+			if diags := plan.Set(ctx, model); diags.HasError() {
+				t.Fatal(diags)
+			}
+			var resp resource.ValidateConfigResponse
+			(&ACLPolicyResource{}).ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: plan.Raw}}, &resp)
+			if resp.Diagnostics.HasError() != test.invalid {
+				t.Fatalf("diagnostics=%v", resp.Diagnostics)
+			}
+		})
 	}
 }
 
@@ -85,14 +228,18 @@ func TestACLPolicyCreatesServiceRulesThroughACLRulePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	posts := f.posts
-	if _, err := c.ApplyACLPolicy(ctx, serviceACLPolicy("8", "198.51.100.0/24"), &grown.State); err == nil || f.posts != posts {
-		t.Fatal("service scope change was applied")
+	f.addService("https-2", 8)
+	changed, err := c.ApplyACLPolicy(ctx, serviceACLPolicy("8", "198.51.100.0/24"), &grown.State)
+	if err != nil {
+		t.Fatalf("per-rule service change was rejected: %v", err)
 	}
-	if _, err := c.ImportACLPolicy(ctx, grown.State.Name, grown.State.Generation); err != nil {
+	if changed.State.Generation == grown.State.Generation {
+		t.Fatal("service change did not stage a new generation")
+	}
+	if _, err := c.ImportACLPolicy(ctx, changed.State.Name, changed.State.Generation); err != nil {
 		t.Fatalf("import of a service-backed policy: %v", err)
 	}
-	if err := c.DeleteACLPolicy(ctx, grown.State); err != nil {
+	if err := c.DeleteACLPolicy(ctx, changed.State); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -102,6 +249,55 @@ func TestACLPolicyRejectsUnknownServiceBeforeWrites(t *testing.T) {
 	c := aclFixtureClient(t, f)
 	if _, err := c.ApplyACLPolicy(context.Background(), serviceACLPolicy("404", "198.51.100.0/24"), nil); err == nil || f.posts != 0 {
 		t.Fatal("policy with a missing service wrote ACL rows")
+	}
+}
+
+func TestACLPolicyReadsLegacyThreeDigitGeneration(t *testing.T) {
+	f := newTerraformACLFixture(t)
+	c := aclFixtureClient(t, f)
+	ctx := context.Background()
+	initial, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.State.Names) != 2 || !strings.HasSuffix(initial.State.Names[0], "-01") || !strings.HasSuffix(initial.State.Names[1], "-02") {
+		t.Fatalf("new generation did not use two-digit suffixes: %v", initial.State.Names)
+	}
+
+	// Rewrite the generation as a released v2 provider would have named it.
+	legacy := initial.State
+	legacy.Names = nil
+	for i, name := range initial.State.Names {
+		legacyName := strings.TrimSuffix(name, fmt.Sprintf("-%02d", i+1)) + fmt.Sprintf("-%03d", i+1)
+		for _, row := range f.rows {
+			if row["Name"] == name {
+				row["Name"] = legacyName
+			}
+		}
+		legacy.Names = append(legacy.Names, legacyName)
+		legacy.Rules[i].Name = legacyName
+	}
+	if _, err := c.ReadACLPolicy(ctx, legacy); err != nil {
+		t.Fatalf("read of a three-digit generation: %v", err)
+	}
+	imported, err := c.ImportACLPolicy(ctx, legacy.Name, legacy.Generation)
+	if err != nil {
+		t.Fatalf("import of a three-digit generation: %v", err)
+	}
+	if len(imported.Names) != len(legacy.Names) || imported.Names[0] != legacy.Names[0] {
+		t.Fatalf("legacy import ledger: %#v", imported.Names)
+	}
+	out, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24", "192.0.2.0/24"), &legacy)
+	if err != nil {
+		t.Fatalf("update from a three-digit generation: %v", err)
+	}
+	for i, name := range out.State.Names {
+		if !strings.HasSuffix(name, fmt.Sprintf("-%02d", i+1)) {
+			t.Fatalf("replacement generation did not use two-digit suffixes: %v", out.State.Names)
+		}
+	}
+	if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -115,7 +311,7 @@ func TestACLPolicyStagesGrowthBehindExistingDrop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Changed || len(first.State.Names) != 2 || !strings.HasSuffix(first.State.Names[0], "-001") || first.State.Rules[0].Order != 2 {
+	if !first.Changed || len(first.State.Names) != 2 || !strings.HasSuffix(first.State.Names[0], "-01") || first.State.Rules[0].Order != 2 {
 		t.Fatalf("unexpected state: %#v", first)
 	}
 	beforeUpdate := len(f.history)
@@ -208,8 +404,8 @@ func TestACLPolicyFailuresPreserveOwnershipAndOldDrop(t *testing.T) {
 	}
 }
 
-func TestACLPolicyPreflightRejectsCollisionsDriftAndScopeChange(t *testing.T) {
-	for _, kind := range []string{"untracked", "duplicate", "interleaved", "scope", "drift", "missing"} {
+func TestACLPolicyPreflightRejectsCollisionsDriftAndMissingRows(t *testing.T) {
+	for _, kind := range []string{"untracked", "duplicate", "interleaved", "drift", "missing"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newTerraformACLFixture(t)
 			f.compactOrders = true
@@ -227,10 +423,6 @@ func TestACLPolicyPreflightRejectsCollisionsDriftAndScopeChange(t *testing.T) {
 				f.rows = append(f.rows, fixtureACLRow(initial.State.Names[0], 4, 4))
 			case "interleaved":
 				f.rows = append(f.rows, fixtureACLRow("other", 4, 4))
-			case "scope":
-				for i := range desired.Rules {
-					desired.Rules[i].DestinationCIDR = "192.0.2.1/32"
-				}
 			case "drift":
 				f.rows[1]["Enable"] = false
 			case "missing":
