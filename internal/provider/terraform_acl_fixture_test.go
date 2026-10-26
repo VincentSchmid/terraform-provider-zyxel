@@ -33,6 +33,15 @@ type terraformACLFixture struct {
 	posts               int
 	deletes             int
 	forceOrder          bool
+	compactOrders       bool
+	rejectOccupiedOrder bool
+	mutateCreate        func(map[string]any)
+	activeSessions      int
+	maxActiveSessions   int
+	requestedOrders     []int
+	failPostAt          int
+	failDeleteAt        int
+	history             [][]map[string]any
 	brokenReads         bool
 	failReadback        bool
 	failNextRead        bool
@@ -52,7 +61,7 @@ func newTerraformACLFixture(t *testing.T) *terraformACLFixture {
 	}
 	f := &terraformACLFixture{key: key, sessions: map[string]*terraformACLSession{}}
 	// Deliberately outside the managed profile: CRUD must leave it alone.
-	f.rows = []map[string]any{{"Name": "unmanaged", "Order": 1, "Protocol": "UDP", "Direction": "LAN_TO_WAN", "Interface": "LAN", "X_ZYXEL_ServiceIndex": 0}}
+	f.rows = []map[string]any{{"Name": "unmanaged", "Order": 1, "Target": "Accept", "Protocol": "UDP", "Direction": "LAN_TO_WAN", "Interface": "LAN", "X_ZYXEL_ServiceIndex": 0}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
 	t.Cleanup(f.server.Close)
 	return f
@@ -65,6 +74,10 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		f.sequence++
 		id := strconv.Itoa(f.sequence)
 		f.sessions[id] = &terraformACLSession{}
+		f.activeSessions++
+		if f.activeSessions > f.maxActiveSessions {
+			f.maxActiveSessions = f.activeSessions
+		}
 		http.SetCookie(w, &http.Cookie{Name: "fixture-session", Value: id, Path: "/"})
 		_, _ = io.WriteString(w, `{}`)
 		return
@@ -106,6 +119,7 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		delete(f.sessions, cookie.Value)
+		f.activeSessions--
 		_, _ = io.WriteString(w, `{}`)
 	case "/cgi-bin/DAL":
 		oid := r.URL.Query().Get("oid")
@@ -207,6 +221,15 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 		switch r.Method {
 		case http.MethodPost:
+			f.requestedOrders = append(f.requestedOrders, fixtureInt(body["Order"]))
+			if f.rejectOccupiedOrder {
+				for _, row := range f.rows {
+					if fixtureInt(row["Order"]) == fixtureInt(body["Order"]) {
+						f.reply(w, s, map[string]any{"result": "ZCFG_INVALID_PARAM_VALUE"})
+						return
+					}
+				}
+			}
 			// Typical firmware read normalization: the write accepts display
 			// values while the stored row uses router-native values.
 			switch body["IPVersion"] {
@@ -235,10 +258,17 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			if f.forceOrder {
 				body["Order"] = 99
 			}
+			if f.mutateCreate != nil {
+				f.mutateCreate(body)
+			}
 			f.rows = append(f.rows, body)
 			f.posts++
 			f.failNextRead = f.failReadback
 		case http.MethodDelete:
+			if f.failDeleteAt != 0 && f.deletes+1 == f.failDeleteAt {
+				http.Error(w, "fixture delete failure", http.StatusServiceUnavailable)
+				return
+			}
 			index, err := strconv.Atoi(r.URL.Query().Get("Index"))
 			if err != nil || index < 1 || index > len(f.rows) || len(body) != 0 {
 				http.Error(w, "invalid current index", http.StatusBadRequest)
@@ -250,7 +280,20 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "unsupported write method", http.StatusMethodNotAllowed)
 			return
 		}
-		if r.Method == http.MethodPost && f.failPostAfterCommit {
+		if f.compactOrders {
+			for i, row := range f.rows {
+				row["Order"] = i + 1
+			}
+		}
+		snapshot := make([]map[string]any, len(f.rows))
+		for i, row := range f.rows {
+			snapshot[i] = map[string]any{}
+			for k, v := range row {
+				snapshot[i][k] = v
+			}
+		}
+		f.history = append(f.history, snapshot)
+		if r.Method == http.MethodPost && (f.failPostAfterCommit || f.failPostAt != 0 && f.posts == f.failPostAt) {
 			f.rotate(s)
 			http.Error(w, "fixture failure after commit", http.StatusInternalServerError)
 			return

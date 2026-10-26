@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -19,14 +20,19 @@ const (
 	aclIPVersionIPv4     = "ipv4"
 	aclIPVersionIPv6     = "ipv6"
 	aclDirectionWANToLAN = "wan_to_lan"
+	ACLOrderStrict       = "strict"
+	ACLOrderAppend       = "append"
 )
 
 var ErrACLRuleNotFound = errors.New("ACL rule not found")
 
 type ACLRule struct {
-	Name            string
-	Action          string
-	Order           int64
+	Name   string
+	Action string
+	Order  int64
+	// OrderMode selects creation semantics. Empty means strict. Append requires
+	// Order == 0; the returned rule contains the observed position, not a mode.
+	OrderMode       string
 	Protocol        string
 	IPVersion       string
 	Direction       string
@@ -101,11 +107,17 @@ func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutc
 		return outcome, err
 	}
 	err := c.withSession(ctx, func(s *routerSession) error {
+		var err error
+		outcome, err = s.createACLRule(ctx, rule, false)
+		return err
+	})
+	return outcome, err
+}
+
+func (s *routerSession) createACLRule(ctx context.Context, rule ACLRule, policyStaging bool) (ACLCreateOutcome, error) {
+	var outcome ACLCreateOutcome
+	err := func() error {
 		serviceIndex, err := s.resolveACLServiceIndex(ctx, rule.Service, rule.ServiceID)
-		if err != nil {
-			return err
-		}
-		payload, err := rule.dalPayload(serviceIndex)
 		if err != nil {
 			return err
 		}
@@ -120,14 +132,34 @@ func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutc
 		if match != nil {
 			return errors.New("an ACL rule with this name already exists; import it before managing it")
 		}
+		appendOrder := rule.OrderMode == ACLOrderAppend
+		var maximum int64
 		for _, row := range rows {
 			order, ok := aclInt64(row["Order"])
 			if !ok || order < 1 {
 				return errors.New("router returned an ACL rule with an invalid order; refusing to create an ambiguous rule")
 			}
-			if order == rule.Order {
+			if !appendOrder && order == rule.Order {
 				return fmt.Errorf("ACL order %d is already used by another router rule", rule.Order)
 			}
+			if order > maximum {
+				maximum = order
+			}
+		}
+		if appendOrder {
+			if !policyStaging {
+				if err := validateACLAppend(rows, rule.Action); err != nil {
+					return err
+				}
+			}
+			if maximum == math.MaxInt64 {
+				return errors.New("ACL order cannot be incremented safely")
+			}
+			rule.Order, rule.OrderMode = maximum+1, ACLOrderStrict
+		}
+		payload, err := rule.dalPayload(serviceIndex)
+		if err != nil {
+			return err
 		}
 
 		response, err := s.writeDAL(ctx, http.MethodPost, firewallACLOID, "", payload)
@@ -158,51 +190,117 @@ func (c *Client) CreateACLRule(ctx context.Context, rule ACLRule) (ACLCreateOutc
 			return fmt.Errorf("ACL rule was created but its readback is unsupported: %w", err)
 		}
 		outcome.Rule = &observed
+		if appendOrder {
+			// Firmware may compact the whole table. Verify relative placement,
+			// not equality to the numeric position submitted before the write.
+			if err := verifyACLAppendPosition(rows, observed); err != nil {
+				return fmt.Errorf("ACL rule was created but append verification failed: %w", err)
+			}
+			if !policyStaging {
+				if err := verifyACLAppend(rows, observed); err != nil {
+					return fmt.Errorf("ACL rule was created but append verification failed: %w", err)
+				}
+			}
+			rule.Order = observed.Order
+		}
 		if differences := aclRuleDifferences(rule, observed); len(differences) > 0 {
 			return fmt.Errorf("ACL rule was created but router readback differs in: %s", strings.Join(differences, ", "))
 		}
 		return nil
-	})
+	}()
 	return outcome, err
+}
+
+// Without verified insertion/reordering, an accept behind a terminal rule may
+// never take effect. Keep unrelated profiles opaque and fail conservatively.
+func validateACLAppend(rows []map[string]any, action string) error {
+	if action != "accept" {
+		return nil
+	}
+	for _, row := range rows {
+		if enabled, ok := aclBool(row["Enable"]); ok && !enabled {
+			continue
+		}
+		target, ok := aclString(row["Target"])
+		if !ok || !strings.EqualFold(target, "accept") {
+			return errors.New("cannot append an accept after an existing drop/reject or unknown action; safe insertion/reordering is not supported; review the complete policy before any writes")
+		}
+	}
+	return nil
+}
+
+func verifyACLAppend(rows []map[string]any, observed ACLRule) error {
+	if err := verifyACLAppendPosition(rows, observed); err != nil {
+		return err
+	}
+	var others []map[string]any
+	for _, row := range rows {
+		if row["Name"] != observed.Name {
+			others = append(others, row)
+		}
+	}
+	return validateACLAppend(others, observed.Action)
+}
+
+func verifyACLAppendPosition(rows []map[string]any, observed ACLRule) error {
+	orders := make(map[int64]bool, len(rows))
+	for _, row := range rows {
+		order, ok := aclInt64(row["Order"])
+		if !ok || order < 1 || orders[order] {
+			return errors.New("router returned invalid or duplicate ACL orders")
+		}
+		orders[order] = true
+		if row["Name"] == observed.Name {
+			continue
+		}
+		if order >= observed.Order {
+			return errors.New("created rule is not last in the ACL table")
+		}
+	}
+	return nil
 }
 
 func (c *Client) DeleteACLRule(ctx context.Context, name string) error {
 	return c.withSession(ctx, func(s *routerSession) error {
-		rows, err := s.readACLRows(ctx)
-		if err != nil {
-			return err
-		}
-		row, err := findACLRow(rows, name)
-		if err != nil {
-			return err
-		}
-		if row == nil {
-			return nil
-		}
-		index, ok := aclInt64((*row)["Index"])
-		if !ok || index < 1 {
-			return errors.New("router returned an invalid ACL index for the named rule")
-		}
-		response, err := s.writeDAL(ctx, http.MethodDelete, firewallACLOID, strconv.FormatInt(index, 10), map[string]any{})
-		if err != nil {
-			return err
-		}
-		if response["result"] != "ZCFG_SUCCESS" {
-			return errors.New("router rejected the ACL rule delete request")
-		}
-		rows, err = s.readACLRows(ctx)
-		if err != nil {
-			return fmt.Errorf("ACL rule delete was accepted but readback failed: %w", err)
-		}
-		remaining, err := findACLRow(rows, name)
-		if err != nil {
-			return err
-		}
-		if remaining != nil {
-			return errors.New("ACL rule delete was accepted but the named rule remains")
-		}
-		return nil
+		return s.deleteACLRule(ctx, name)
 	})
+}
+
+func (s *routerSession) deleteACLRule(ctx context.Context, name string) error {
+	rows, err := s.readACLRows(ctx)
+	if err != nil {
+		return err
+	}
+	row, err := findACLRow(rows, name)
+	if err != nil {
+		return err
+	}
+	if row == nil {
+		return nil
+	}
+	index, ok := aclInt64((*row)["Index"])
+	if !ok || index < 1 {
+		return errors.New("router returned an invalid ACL index for the named rule")
+	}
+	response, err := s.writeDAL(ctx, http.MethodDelete, firewallACLOID, strconv.FormatInt(index, 10), map[string]any{})
+	if err != nil {
+		return err
+	}
+	if response["result"] != "ZCFG_SUCCESS" {
+		return errors.New("router rejected the ACL rule delete request")
+	}
+	rows, err = s.readACLRows(ctx)
+	if err != nil {
+		return fmt.Errorf("ACL rule delete was accepted but readback failed: %w", err)
+	}
+	remaining, err := findACLRow(rows, name)
+	if err != nil {
+		return err
+	}
+	if remaining != nil {
+		return errors.New("ACL rule delete was accepted but the named rule remains")
+	}
+	return nil
 }
 
 func (s *routerSession) readACLRows(ctx context.Context) ([]map[string]any, error) {
@@ -336,8 +434,20 @@ func (r ACLRule) validateForWrite() error {
 			return errors.New("service_id requires the neutral all protocol; the referenced service selects the protocol")
 		}
 	}
-	if strings.TrimSpace(r.Name) == "" || r.Order < 1 {
-		return errors.New("ACL name must be non-empty and order must be positive")
+	if strings.TrimSpace(r.Name) == "" {
+		return errors.New("ACL name must be non-empty")
+	}
+	switch r.OrderMode {
+	case "", ACLOrderStrict:
+		if r.Order < 1 {
+			return errors.New("strict ACL order must be positive")
+		}
+	case ACLOrderAppend:
+		if r.Order != 0 {
+			return errors.New("append ACL mode requires order to be omitted (zero)")
+		}
+	default:
+		return errors.New("ACL order mode must be strict or append")
 	}
 	if _, err := r.routerTarget(); err != nil {
 		return err
