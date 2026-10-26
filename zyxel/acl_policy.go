@@ -86,7 +86,15 @@ func (p ACLPolicy) Validate() error {
 
 func aclPolicyPrefix(name string) string { return name + "-g" }
 
+// aclPolicyRowName is the current row-name format: a two-digit position within
+// one generation. Generations of more than 99 rules naturally use a third digit.
 func aclPolicyRowName(name, generation string, i int) string {
+	return fmt.Sprintf("%s%s-%02d", aclPolicyPrefix(name), generation, i+1)
+}
+
+// legacyACLPolicyRowName is the three-digit format written by released v2
+// providers. Keep reading, importing and retiring those generations.
+func legacyACLPolicyRowName(name, generation string, i int) string {
 	return fmt.Sprintf("%s%s-%03d", aclPolicyPrefix(name), generation, i+1)
 }
 
@@ -298,7 +306,7 @@ func observeACLPolicy(rows []map[string]any, state ACLPolicyState) (ACLPolicySta
 	observed.Rules = nil
 	var lastOrder int64
 	for i, name := range state.Names {
-		if name != aclPolicyRowName(state.Name, state.Generation, i) || i >= len(state.Rules) {
+		if i >= len(state.Rules) || (name != aclPolicyRowName(state.Name, state.Generation, i) && name != legacyACLPolicyRowName(state.Name, state.Generation, i)) {
 			return state, errors.New("ACL policy has an incomplete ownership ledger; operator recovery required")
 		}
 		row, err := findACLRow(rows, name)
@@ -360,6 +368,16 @@ func (c *Client) ImportACLPolicy(ctx context.Context, name, generation string) (
 			row, err := findACLRow(rows, n)
 			if err != nil {
 				return err
+			}
+			if row == nil {
+				legacy := legacyACLPolicyRowName(name, generation, i)
+				row, err = findACLRow(rows, legacy)
+				if err != nil {
+					return err
+				}
+				if row != nil {
+					n = legacy
+				}
 			}
 			if row == nil {
 				break

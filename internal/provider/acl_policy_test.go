@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -251,6 +252,55 @@ func TestACLPolicyRejectsUnknownServiceBeforeWrites(t *testing.T) {
 	}
 }
 
+func TestACLPolicyReadsLegacyThreeDigitGeneration(t *testing.T) {
+	f := newTerraformACLFixture(t)
+	c := aclFixtureClient(t, f)
+	ctx := context.Background()
+	initial, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.State.Names) != 2 || !strings.HasSuffix(initial.State.Names[0], "-01") || !strings.HasSuffix(initial.State.Names[1], "-02") {
+		t.Fatalf("new generation did not use two-digit suffixes: %v", initial.State.Names)
+	}
+
+	// Rewrite the generation as a released v2 provider would have named it.
+	legacy := initial.State
+	legacy.Names = nil
+	for i, name := range initial.State.Names {
+		legacyName := strings.TrimSuffix(name, fmt.Sprintf("-%02d", i+1)) + fmt.Sprintf("-%03d", i+1)
+		for _, row := range f.rows {
+			if row["Name"] == name {
+				row["Name"] = legacyName
+			}
+		}
+		legacy.Names = append(legacy.Names, legacyName)
+		legacy.Rules[i].Name = legacyName
+	}
+	if _, err := c.ReadACLPolicy(ctx, legacy); err != nil {
+		t.Fatalf("read of a three-digit generation: %v", err)
+	}
+	imported, err := c.ImportACLPolicy(ctx, legacy.Name, legacy.Generation)
+	if err != nil {
+		t.Fatalf("import of a three-digit generation: %v", err)
+	}
+	if len(imported.Names) != len(legacy.Names) || imported.Names[0] != legacy.Names[0] {
+		t.Fatalf("legacy import ledger: %#v", imported.Names)
+	}
+	out, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24", "192.0.2.0/24"), &legacy)
+	if err != nil {
+		t.Fatalf("update from a three-digit generation: %v", err)
+	}
+	for i, name := range out.State.Names {
+		if !strings.HasSuffix(name, fmt.Sprintf("-%02d", i+1)) {
+			t.Fatalf("replacement generation did not use two-digit suffixes: %v", out.State.Names)
+		}
+	}
+	if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestACLPolicyStagesGrowthBehindExistingDrop(t *testing.T) {
 	f := newTerraformACLFixture(t)
 	f.rows[0]["Order"] = 40
@@ -261,7 +311,7 @@ func TestACLPolicyStagesGrowthBehindExistingDrop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.Changed || len(first.State.Names) != 2 || !strings.HasSuffix(first.State.Names[0], "-001") || first.State.Rules[0].Order != 2 {
+	if !first.Changed || len(first.State.Names) != 2 || !strings.HasSuffix(first.State.Names[0], "-01") || first.State.Rules[0].Order != 2 {
 		t.Fatalf("unexpected state: %#v", first)
 	}
 	beforeUpdate := len(f.history)

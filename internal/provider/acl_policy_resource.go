@@ -62,7 +62,7 @@ func (*ACLPolicyResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. Migrating from the earlier single-list shape means moving the former final `drop` from `rules` to `drop_rules`; existing state remains readable and no state upgrader is used. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.",
 		Attributes: map[string]schema.Attribute{
-			"name": schema.StringAttribute{Required: true, MarkdownDescription: "Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-001, -002, etc. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
+			"name": schema.StringAttribute{Required: true, MarkdownDescription: "Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-01, -02, etc.; three-digit suffixes from v2 providers remain readable. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
 			"rules": schema.ListNestedAttribute{
 				Optional: true, MarkdownDescription: "Ordered accept rules, evaluated before every entry in `drop_rules`. Each entry must have `action = \"accept\"`. Rules may have different protocols, services, address families, directions, destinations and ports. No numeric order is configured.",
 				NestedObject: aclPolicyRuleObject(),
@@ -168,7 +168,7 @@ func modelACLPolicy(model aclPolicyModel) (zyxel.ACLPolicy, bool) {
 			}
 			known = known && !protocol.IsUnknown()
 			rule := zyxel.ACLRule{
-				Name: fmt.Sprintf("rule-%03d", index), Action: m.Action.ValueString(), Enabled: true,
+				Name: fmt.Sprintf("rule-%02d", index), Action: m.Action.ValueString(), Enabled: true,
 				Protocol: protocol.ValueString(), Service: m.Service.ValueString(), ServiceID: m.ServiceID.ValueString(),
 				IPVersion: m.IPVersion.ValueString(), Direction: m.Direction.ValueString(),
 				SourceCIDR: m.SourceCIDR.ValueString(), DestinationCIDR: m.DestinationCIDR.ValueString(),

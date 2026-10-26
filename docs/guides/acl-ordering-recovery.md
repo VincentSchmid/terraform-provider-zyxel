@@ -33,16 +33,19 @@ The effective order is `concat(rules, drop_rules)`. Separate lists make drops
 explicit, so a policy cannot silently forget its deny coverage, and no accept
 can be written after a drop. See
 `examples/resources/zyxel_acl_policy/resource.tf`. Zero accepts plus one drop is
-supported, up to 999 rules total. Names are `<policy>-g<generation>-001`,
-`-002`, etc. Exact generated names are stored in `row_names`; prefix matching
-never grants ownership during create.
+supported, up to 999 rules total. New names are `<policy>-g<generation>-01`,
+`-02`, etc.; positions 100 and above naturally use a third digit. Generations
+written by earlier v2 providers with three-digit suffixes remain readable,
+importable and retirable. Exact generated names are stored in `row_names`;
+prefix matching never grants ownership during create.
 
 The earlier policy shape used one `rules` list whose final entry was the drop.
 Existing state remains readable because `row_names`, `observed_orders` and the
 internal ledger stay combined in effective order; there is no state upgrader.
 Move that final entry from `rules` to `drop_rules` in configuration. The next
 plan reports a normal update and stages a new generation; it does not adopt,
-rename or delete rows in place.
+rename or delete rows in place. That update writes the compact two-digit names
+even when the retired generation used three digits.
 
 Rules are validated independently: they may use different protocols, address
 families, directions, destinations, ports, MAC filters and `service`/`service_id`

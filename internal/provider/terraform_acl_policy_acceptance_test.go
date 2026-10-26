@@ -108,7 +108,7 @@ func TestAccACLPolicy_serviceRules(t *testing.T) {
 				if index := fixtureInt(row["X_ZYXEL_ServiceIndex"]); index != 101 {
 					return "", fmt.Errorf("policy row %q does not reference the service: %d", name, index)
 				}
-				return "policy-service/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-service-g"), "-001"), nil
+				return "policy-service/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-service-g"), "-01"), nil
 			}
 			return "", fmt.Errorf("no policy generation found")
 		}},
@@ -202,7 +202,7 @@ func TestAccACLPolicy_growthShrinkRefreshAndImport(t *testing.T) {
 			defer f.mu.Unlock()
 			for _, row := range f.rows {
 				if name, ok := row["Name"].(string); ok && strings.HasPrefix(name, "policy-https-g") {
-					return "policy-https/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-https-g"), "-001"), nil
+					return "policy-https/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-https-g"), "-01"), nil
 				}
 			}
 			return "", fmt.Errorf("no policy generation found")

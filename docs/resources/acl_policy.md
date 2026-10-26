@@ -127,7 +127,7 @@ resource "zyxel_acl_policy" "mixed" {
 ### Required
 
 - `drop_rules` (Attributes List) Ordered drop/reject rules, evaluated after every accept. Each entry must have `action = "drop"` or `"reject"`; at least one entry is required so a policy cannot silently omit its deny coverage. Rules may have different scopes. (see [below for nested schema](#nestedatt--drop_rules))
-- `name` (String) Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-001, -002, etc. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.
+- `name` (String) Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-01, -02, etc.; three-digit suffixes from v2 providers remain readable. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.
 
 ### Optional
 
