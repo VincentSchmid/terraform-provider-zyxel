@@ -29,14 +29,17 @@ Zero accepts plus one drop is supported, up to 998 accepts plus one drop. Names
 are `<policy>-g<generation>-001`, `-002`, etc. Exact generated names are stored
 in `row_names`; prefix matching never grants ownership during create.
 
-This initial implementation intentionally supports only enabled inline accepts
-followed by one enabled drop matching any source. All rules share protocol,
-address family, direction, destination CIDR and source/destination port filters.
-No services, MAC/TCP flags, rate limits, schedules or interface selection are
+This implementation intentionally supports only enabled accepts followed by one
+enabled drop matching any source. All rules share protocol (or service), address
+family, direction, destination CIDR and source/destination port filters. Rules
+may reference a custom `service_id`, which replaces the inline protocol and port
+filters exactly like `zyxel_acl_rule`; the computed protocol is then `all`. The
+policy passes those parameters to the same ACL rule create/verify path. No
+service names, MAC/TCP flags, rate limits, schedules or interface selection are
 exposed. The drop is a catch-all **within those filters**, not for the entire
-firewall. Policy rules have no numeric order. Traffic-scope changes are rejected
-before writes; changing source ranges, accept order and collection size is
-supported.
+firewall. Policy rules have no numeric order. Traffic-scope changes, including a
+different `service_id`, are rejected before writes; changing source ranges,
+accept order and collection size is supported.
 
 The policy must own a contiguous table tail after an unrelated prefix. Prefix
 rules must be accepts or disabled. Operators must review them for overlap: a

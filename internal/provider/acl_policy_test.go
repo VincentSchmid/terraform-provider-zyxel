@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/VincentSchmid/terraform-provider-zyxel/zyxel"
+
+	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 func fixtureACLPolicy(sources ...string) zyxel.ACLPolicy {
@@ -19,6 +21,88 @@ func fixtureACLPolicy(sources ...string) zyxel.ACLPolicy {
 		p.Rules = append(p.Rules, r)
 	}
 	return p
+}
+
+// serviceACLPolicy swaps the inline filters for a custom service, exactly as
+// the adapter does when a rule sets service_id.
+func serviceACLPolicy(service string, sources ...string) zyxel.ACLPolicy {
+	p := fixtureACLPolicy(sources...)
+	for i := range p.Rules {
+		p.Rules[i].Protocol, p.Rules[i].ServiceID = "all", service
+		p.Rules[i].DestinationPortStart, p.Rules[i].DestinationPortEnd = nil, nil
+	}
+	return p
+}
+
+func TestACLPolicyModelPassesServiceRuleParameters(t *testing.T) {
+	rule := func(action, source string) aclPolicyRuleModel {
+		return aclPolicyRuleModel{
+			Action: types.StringValue(action), Protocol: types.StringNull(), ServiceID: types.StringValue("101"),
+			IPVersion: types.StringValue("ipv4"), Direction: types.StringValue("wan_to_lan"),
+			SourceCIDR: types.StringValue(source), DestinationCIDR: types.StringValue("203.0.113.10/32"),
+			SourcePorts: types.StringNull(), DestinationPorts: types.StringNull(),
+		}
+	}
+	model := aclPolicyModel{Name: types.StringValue("policy"), Rules: []aclPolicyRuleModel{
+		rule("accept", "198.51.100.0/24"), rule("drop", "0.0.0.0/0"),
+	}}
+	p, known := modelACLPolicy(model)
+	if !known {
+		t.Fatal("service policy rules must be known before writes")
+	}
+	for _, got := range p.Rules {
+		if got.ServiceID != "101" || got.Protocol != "all" || got.DestinationPorts != "" || got.SourcePorts != "" {
+			t.Fatalf("service_id was not passed to the ACL rule: %#v", got)
+		}
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	model.Rules[0].ServiceID = types.StringUnknown()
+	if _, known := modelACLPolicy(model); known {
+		t.Fatal("unknown service_id must block the write")
+	}
+}
+
+func TestACLPolicyCreatesServiceRulesThroughACLRulePath(t *testing.T) {
+	f := newTerraformACLFixture(t)
+	f.addService("https", 7)
+	c := aclFixtureClient(t, f)
+	ctx := context.Background()
+	out, err := c.ApplyACLPolicy(ctx, serviceACLPolicy("7", "198.51.100.0/24"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.State.Rules) != 2 {
+		t.Fatalf("unexpected ledger: %#v", out.State)
+	}
+	for _, rule := range out.State.Rules {
+		if rule.ServiceID != "7" || rule.Protocol != "all" || rule.DestinationPortStart != nil {
+			t.Fatalf("service filters not preserved through the ACL rule path: %#v", rule)
+		}
+	}
+	grown, err := c.ApplyACLPolicy(ctx, serviceACLPolicy("7", "198.51.100.0/24", "192.0.2.0/24"), &out.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := f.posts
+	if _, err := c.ApplyACLPolicy(ctx, serviceACLPolicy("8", "198.51.100.0/24"), &grown.State); err == nil || f.posts != posts {
+		t.Fatal("service scope change was applied")
+	}
+	if _, err := c.ImportACLPolicy(ctx, grown.State.Name, grown.State.Generation); err != nil {
+		t.Fatalf("import of a service-backed policy: %v", err)
+	}
+	if err := c.DeleteACLPolicy(ctx, grown.State); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestACLPolicyRejectsUnknownServiceBeforeWrites(t *testing.T) {
+	f := newTerraformACLFixture(t)
+	c := aclFixtureClient(t, f)
+	if _, err := c.ApplyACLPolicy(context.Background(), serviceACLPolicy("404", "198.51.100.0/24"), nil); err == nil || f.posts != 0 {
+		t.Fatal("policy with a missing service wrote ACL rows")
+	}
 }
 
 func TestACLPolicyStagesGrowthBehindExistingDrop(t *testing.T) {
