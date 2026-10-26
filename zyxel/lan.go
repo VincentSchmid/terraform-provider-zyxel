@@ -3,13 +3,18 @@ package zyxel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
+	"regexp"
+	"strconv"
 )
 
 // LANSettings manages only IPv4 LAN Setup fields for an exact interface-group
 // name. Empty pool/relay addresses mean those fields are inactive, not cleared.
+// DNSMode is proxy or isp; outside server mode it must be proxy (inactive).
+// DHCPLeaseTimeSeconds is required in server mode and must be zero otherwise.
 type LANSettings struct {
 	InterfaceGroupID                    string
 	IPAddress, SubnetMask               string
@@ -18,6 +23,49 @@ type LANSettings struct {
 	BeginningIPAddress, EndingIPAddress string
 	AutoReserveIP                       bool
 	RelayServerAddress                  string
+	DNSMode                             string
+	DHCPLeaseTimeSeconds                int64
+}
+
+var lanLeasePattern = regexp.MustCompile(`^(?:([0-9]+)d)?(?:([0-9]+)h)?(?:([0-9]+)m)?$`)
+
+// ParseLANLeaseTime parses whole days, hours and minutes, from 1m through 365d.
+// Components may exceed their clock ranges, so 24h and 1440m both mean 1d.
+func ParseLANLeaseTime(value string) (int64, error) {
+	parts := lanLeasePattern.FindStringSubmatch(value)
+	if parts == nil || value == "" {
+		return 0, errors.New("dhcp_lease_time must use whole days, hours, or minutes, for example 1d5h12m")
+	}
+	var seconds int64
+	for i, unit := range []int64{86400, 3600, 60} {
+		if parts[i+1] == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(parts[i+1], 10, 64)
+		if err != nil || n > (31536000-seconds)/unit {
+			return 0, errors.New("dhcp_lease_time must be between 1m and 365d")
+		}
+		seconds += n * unit
+	}
+	if seconds < 60 {
+		return 0, errors.New("dhcp_lease_time must be between 1m and 365d")
+	}
+	return seconds, nil
+}
+
+// FormatLANLeaseTime returns a canonical duration for an observed lease.
+func FormatLANLeaseTime(seconds int64) string {
+	value := ""
+	for _, unit := range []struct {
+		seconds int64
+		suffix  string
+	}{{86400, "d"}, {3600, "h"}, {60, "m"}} {
+		if n := seconds / unit.seconds; n > 0 {
+			value += fmt.Sprintf("%d%s", n, unit.suffix)
+		}
+		seconds %= unit.seconds
+	}
+	return value
 }
 
 // Validate checks inputs independently of Terraform, without contacting a router.
@@ -45,8 +93,14 @@ func (v LANSettings) Validate() error {
 	if v.IGMPSnooping != "disabled" && v.IGMPSnooping != "standard" && v.IGMPSnooping != "blocking" {
 		return errors.New("igmp_snooping must be disabled, standard, or blocking")
 	}
+	if v.DNSMode != "proxy" && v.DNSMode != "isp" {
+		return errors.New("dns_mode must be proxy or isp")
+	}
 	switch v.DHCPMode {
 	case "server":
+		if v.DHCPLeaseTimeSeconds < 60 || v.DHCPLeaseTimeSeconds > 31536000 || v.DHCPLeaseTimeSeconds%60 != 0 {
+			return errors.New("dhcp_lease_time must be whole minutes between 1m and 365d in server mode")
+		}
 		start, e1 := lanIPv4(v.BeginningIPAddress)
 		end, e2 := lanIPv4(v.EndingIPAddress)
 		if e1 != nil || e2 != nil || !lanUsableHost(start, prefix) || !lanUsableHost(end, prefix) || start.Compare(end) > 0 {
@@ -59,6 +113,9 @@ func (v LANSettings) Validate() error {
 			return errors.New("relay_server_address is only valid in relay mode")
 		}
 	case "relay", "disabled":
+		if v.DHCPLeaseTimeSeconds != 0 || v.DNSMode != "proxy" {
+			return errors.New("dhcp_lease_time and dns_mode isp are only valid in server mode; proxy is inactive otherwise")
+		}
 		if v.BeginningIPAddress != "" || v.EndingIPAddress != "" || v.AutoReserveIP {
 			return errors.New("DHCP pool and auto_reserve_ip are only valid in server mode")
 		}
@@ -71,7 +128,7 @@ func (v LANSettings) Validate() error {
 			return errors.New("relay_server_address is only valid in relay mode")
 		}
 	default:
-		return errors.New("dhcp_mode must be server, disabled, or relay")
+		return errors.New("DHCP mode must be server, disabled, or relay")
 	}
 	return nil
 }
@@ -140,6 +197,8 @@ func (c *Client) SetLAN(ctx context.Context, v LANSettings) (bool, error) {
 		switch v.DHCPMode {
 		case "server":
 			payload["DHCP_MinAddress"], payload["DHCP_MaxAddress"], payload["DHCP_AutoReserveLanIp"] = v.BeginningIPAddress, v.EndingIPAddress, v.AutoReserveIP
+			payload["DHCP_LeaseTime"] = v.DHCPLeaseTimeSeconds
+			payload["DNS_Type"] = map[string]string{"proxy": "DNSProxy", "isp": "FromISP"}[v.DNSMode]
 		case "relay":
 			payload["DHCPType"], payload["DHCP_RelayAddr"] = "DHCPRelay", v.RelayServerAddress
 		}
@@ -185,7 +244,7 @@ func (s *routerSession) readLAN(ctx context.Context, groupID string) (*LANSettin
 	if found == nil {
 		return nil, nil
 	}
-	v := LANSettings{InterfaceGroupID: groupID}
+	v := LANSettings{InterfaceGroupID: groupID, DNSMode: "proxy"}
 	v.IPAddress, _ = found["IPAddress"].(string)
 	v.SubnetMask, _ = found["SubnetMask"].(string)
 	mode, _ := found["IGMPSnoopingMode"].(string)
@@ -199,6 +258,13 @@ func (s *routerSession) readLAN(ctx context.Context, groupID string) (*LANSettin
 		v.DHCPMode = "disabled"
 		if enabled {
 			v.DHCPMode = "server"
+			dnsType, _ := found["DNS_Type"].(string)
+			v.DNSMode = map[string]string{"DNSProxy": "proxy", "FromISP": "isp"}[dnsType]
+			lease, valid := aclInt64(found["DHCP_LeaseTime"])
+			if !valid {
+				return nil, errors.New("router returned invalid LAN DHCP lease time")
+			}
+			v.DHCPLeaseTimeSeconds = lease
 			v.BeginningIPAddress, _ = found["DHCP_MinAddress"].(string)
 			v.EndingIPAddress, _ = found["DHCP_MaxAddress"].(string)
 			v.AutoReserveIP, ok = firewallBool(found["DHCP_AutoReserveLanIp"])

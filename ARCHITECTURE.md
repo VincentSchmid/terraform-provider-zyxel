@@ -87,7 +87,8 @@ an explicit architecture decision, documentation update, and matching tests.
   Never automatically retry ambiguous writes.
 - LAN settings are built-in per exact group name: Create adopts and updates,
   Delete relinquishes management. Only IPv4 address/mask, IGMP snooping, and
-  active DHCP mode fields are written; IPv6/DNS/lease settings are not copied.
+  active DHCP mode fields are written, including DNS mode and whole-minute lease
+  seconds in server mode; IPv6 and unrelated settings are not copied.
   IP/subnet changes may disconnect the client; retain identity for recovery.
 - Port-based interface groups use exact names as stable IDs, never display
   indexes. Create resolves WAN and LAN interface paths inside the session and

@@ -175,6 +175,9 @@ func (f *NetworkFixture) serve(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case oid == "lan" && r.Method == http.MethodPut:
 				allowed := map[string]bool{"Name": true, "IPAddress": true, "SubnetMask": true, "IGMPSnoopingMode": true, "DHCPType": true, "EnableDHCP": true, "logout": true, "DHCP_MinAddress": true, "DHCP_MaxAddress": true, "DHCP_AutoReserveLanIp": true, "DHCP_RelayAddr": true}
+				if body["DHCPType"] == "DHCPServer" && body["EnableDHCP"] == true {
+					allowed["DHCP_LeaseTime"], allowed["DNS_Type"] = true, true
+				}
 				for key := range body {
 					if !allowed[key] {
 						f.t.Errorf("unexpected LAN write field %s", key)

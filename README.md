@@ -287,10 +287,14 @@ resource "zyxel_lan" "guests" {
   ip_address           = "192.168.20.1"
   subnet_mask          = "255.255.255.0"
   igmp_snooping        = "standard"
-  dhcp_mode            = "server"
-  beginning_ip_address = "192.168.20.100"
-  ending_ip_address    = "192.168.20.200"
-  auto_reserve_ip      = true
+  dns_mode             = "proxy"
+  dhcp = {
+    mode                 = "server"
+    beginning_ip_address = "192.168.20.100"
+    ending_ip_address    = "192.168.20.200"
+    auto_reserve_ip      = true
+    dhcp_lease_time      = "1d"
+  }
 }
 ```
 
@@ -301,11 +305,19 @@ its stable `id`, not a shifting display index. Group creation requires WAN and
 LAN members; classification criteria are outside this increment. Group changes
 replace the entry. Existing groups require import by exact name.
 
-`dhcp_mode = "disabled"` omits pool and relay fields. `dhcp_mode = "relay"`
-requires `relay_server_address` instead of the pool. `auto_reserve_ip` may be
-true only in server mode. `igmp_snooping` is `disabled`, `standard`, or `blocking`.
-LAN updates are in place; IPv6, DNS, lease time, and other settings are untouched.
+`dhcp = { mode = "disabled" }` omits pool, lease, and relay fields. Relay mode
+requires `dhcp.relay_server_address` instead of pool/lease fields.
+`dhcp.auto_reserve_ip` may be true only in server mode. Server mode requires
+`dhcp.dhcp_lease_time`: `1d`, `24h`, `1440m`, or combinations such as `1d5h12m`,
+between `1m` and `365d`. Top-level `dns_mode` is `proxy` (default) or `isp`;
+`isp` is only valid in server mode. Other modes leave DNS/lease settings untouched.
+`igmp_snooping` is `disabled`, `standard`, or `blocking`.
+LAN updates are in place; IPv6 and unrelated settings are untouched.
 LAN destroy only stops management. Manage one LAN resource per group.
+
+This is a breaking DHCP schema change: old top-level DHCP fields are removed.
+See [LAN migration instructions](docs/resources/lan.md#breaking-schema-migration)
+to update configuration and reimport an existing state binding safely.
 
 **Connectivity safety:** IP/subnet, DHCP, and membership changes may disconnect
 the provider. No writes are retried automatically. If verification fails after
