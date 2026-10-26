@@ -81,11 +81,12 @@ is used as a pair, and the provider never mixes a configured value with an
 environment value. Configuration is validated without network access;
 authentication happens on the first data source or resource operation. Each
 operation owns a bounded login/request/logout session, and operations sharing a
-provider client are serialized.
+normalized endpoint in this process are serialized, including separate clients.
 
 The router firmware limits concurrent administrator logins. Terraform runs
-resource operations one after another through one client, but avoid running
-several Terraform processes against the router at the same time.
+resource operations one after another for that endpoint. Default parallelism is
+supported, but use exclusive router access: endpoint aliases, separate Terraform
+processes and UI users are not coordinated by the process-local lock.
 
 ## Resources and data sources
 
@@ -96,6 +97,7 @@ several Terraform processes against the router at the same time.
 | `zyxel_dhcp_reservation` | resource | Enabled static DHCP reservation by MAC address |
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
 | `zyxel_acl_rule` | resource | Firewall ACL entry with IPv4/IPv6, protocol, MAC, service, TCP flag, direction, and rate-limit filters |
+| `zyxel_acl_policy` | resource | Ordered accept collection plus trailing drop, with staged generation updates |
 | `zyxel_service` | resource | Reusable firewall protocol/service object referenced by ACL ID |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
 | `zyxel_interface_group` | resource | Port-based interface groups, referenced by exact-name ID |
@@ -199,9 +201,12 @@ The following behavior applies to DHCP reservations, NAT rules, services, and AC
   entry name as identity and import key; `zyxel_dhcp_reservation` uses the MAC
   address. Existing entries must be imported explicitly. Create never adopts an
   existing entry, and duplicate matches are errors rather than guesses.
+  `zyxel_acl_policy` owns generation-qualified rows through its `row_names`
+  ledger, not a single name.
 - **Changes replace entries.** No in-place update operation is verified on this
   firmware, so every configurable change deletes and recreates the entry.
-  Forwarding or firewall coverage can be interrupted in between.
+  Forwarding or firewall coverage can be interrupted in between. ACL policies
+  instead stage a verified replacement tail; see the ordering guide for limits.
 - **Router indexes are observations.** `router_index` is refreshed from the
   router and is not identity; indexes shift when other entries are added or
   removed.
@@ -214,7 +219,29 @@ Import examples:
 terraform import zyxel_nat_rule.https 'HTTPS'
 terraform import zyxel_acl_rule.cloudflare 'Cloudflare-104.16.0.0-13'
 terraform import zyxel_dhcp_reservation.nas '02:00:00:00:00:20'
+terraform import zyxel_acl_policy.https 'HTTPS-Sources/0123456789abcdef'
 ```
+
+## ACL Ordering And Policies
+
+For `zyxel_acl_rule`, an explicit `order` preserves strict collision/readback
+checks. Omit `order` to append from the current table and record the observed
+position without numeric-order drift. Appending accepts behind enabled
+drop/reject rules is conservatively refused. A separate drop plus `depends_on`
+does not support adding accepts after that drop already exists.
+
+For a dynamic accept collection followed by a drop, use `zyxel_acl_policy` with
+an ordered `rules` list; see [the example](examples/resources/zyxel_acl_policy/resource.tf).
+It stages and verifies a new generation behind the old drop before retiring old
+accepts and finally the old drop. This supports collection growth/shrink without
+an undocumented router reorder operation. It is restricted to a common traffic
+scope, is not atomic, temporarily needs capacity for both generations, and can
+interrupt traffic. Initial creation has no previous policy protection. All live
+hardware writes remain unverified. Review the unrelated prefix for broad accepts.
+
+Read [ACL ordering, limitations and recovery](docs/guides/acl-ordering-recovery.md)
+before migration or retrying partial/tainted creates. Existing rows are never
+automatically adopted or moved into policy ownership.
 
 ## General firewall settings
 

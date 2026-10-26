@@ -16,8 +16,8 @@ resource "zyxel_acl_rule" "ipv6_https" {
   order                  = 11
   ip_version             = "ipv6"
   direction              = "lan_to_wan"
-  source_cidr            = "2001:db8:lan::/64"
-  destination_cidr       = "2001:db8:server::/128"
+  source_cidr            = "2001:db8:1::/64"
+  destination_cidr       = "2001:db8:2::10/128"
   destination_port_start = 443
   destination_port_end   = 443
 }

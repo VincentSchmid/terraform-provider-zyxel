@@ -210,8 +210,9 @@ limiting for `accept` rules through `packets_per_unit` (1–512 packets) and
 remain outside this resource; schedule references are rejected on read.
 Unrelated ACL entries remain untouched.
 
-Required configuration: exact unique `name`, `action`, positive explicit
-`order`, and canonical `destination_cidr`. `protocol` defaults to `tcp`,
+Required configuration: exact unique `name`, `action`, and canonical
+`destination_cidr`. An explicit positive `order` selects strict semantics;
+omitting it selects verified append semantics. `protocol` defaults to `tcp`,
 `ip_version` to `ipv4`, `direction` to `wan_to_lan`, `source_cidr` to
 `0.0.0.0/0`, and `enabled` to `true`. With `ip_version = "ipv6"` both CIDRs
 must be IPv6. Destination and source port bounds must each be set together, or
@@ -227,9 +228,11 @@ The computed `router_index` is refreshed and used only as a current API
 locator, including before deletion. Source/destination masks use prefix
 lengths, and reads normalize string/numeric fields such as `IPVersion`.
 
-Create rejects an occupied order, posts the requested value, and verifies the
-stored fields and order. It never silently substitutes `max(Order)+1` or
-reorders other entries. When a write has or may have succeeded but cannot be
+Strict create rejects an occupied order, posts the requested value, and verifies
+the stored fields and order. Only an omitted order opts into `max(Order)+1`,
+with verified last placement and computed observed order. Append accepts behind
+enabled drop/reject or unknown actions are refused. Neither model reorders other
+entries. When a write has or may have succeeded but cannot be
 confirmed, the resource records its identity in state and returns a diagnostic.
 Inspect the router/state before retrying a failed creation. A disappeared
 managed row is removed from state; deleting an absent row succeeds.
@@ -240,6 +243,13 @@ resource operations do not establish a global firewall policy: explicit rule
 orders, earlier drop rules, unmanaged entries, and external configuration
 changes still matter. Terraform `depends_on` controls operation sequencing,
 not router evaluation order or cross-process coordination.
+
+`zyxel_acl_policy` separately owns a contiguous ACL tail of equivalent-scope
+accepts and a final catch-all-source drop. It stages complete generations and
+verifies the replacement drop before removing old accepts and the old drop.
+See the architecture decision and [ordering/recovery guide](docs/guides/acl-ordering-recovery.md)
+for scope restrictions, partial ledgers, non-atomic transition semantics and
+explicit import. It uses no ACL PUT or reorder operation.
 
 Local encrypted mock tests and real Terraform tests cover the modeled API,
 field replacement, import, disappearance, index changes, conflicting orders,

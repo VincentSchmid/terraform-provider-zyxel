@@ -66,18 +66,17 @@ resource "zyxel_dhcp_reservation" "nas" {
 }
 
 # Allow only Cloudflare to reach the HTTPS host, then drop everyone else.
+# Each accept appends from the current table; no numeric order is configured.
 data "zyxel_cloudflare_ipv4_ranges" "https" {}
 
 resource "zyxel_acl_rule" "cloudflare" {
   for_each = toset(data.zyxel_cloudflare_ipv4_ranges.https.ranges)
 
-  name                   = "Cloudflare-${replace(each.value, "/", "-")}"
-  action                 = "accept"
-  order                  = index(data.zyxel_cloudflare_ipv4_ranges.https.ranges, each.value) + 1
-  source_cidr            = each.value
-  destination_cidr       = "192.168.1.240/32"
-  destination_port_start = 443
-  destination_port_end   = 443
+  name              = "Cloudflare-${replace(each.value, "/", "-")}"
+  action            = "accept"
+  source_cidr       = each.value
+  destination_cidr  = "192.168.1.240/32"
+  destination_ports = "443"
 }
 ```
 
@@ -88,9 +87,12 @@ Set the complete pair through provider configuration or through both
 an environment value. `ZYXEL_HOST` supplies the host. The provider does not read
 `.env` files or credentials from disk.
 
-The router firmware limits concurrent administrator logins. Operations sharing
-one provider client are serialized, but avoid running several Terraform
-processes against the router at the same time.
+The router firmware limits concurrent administrator logins. Terraform runs
+resource operations one after another for that endpoint. Operations sharing a
+normalized endpoint in this process are serialized, including separate clients.
+Default parallelism is supported, but use exclusive router access: endpoint
+aliases, separate Terraform processes and UI users are not coordinated by the
+process-local lock.
 
 ## Firewall Services
 
@@ -102,6 +104,14 @@ selectors such as `"*"`, `"443"`, and `"443-445"`.
 Service deletion is refused while any ACL references it, to prevent the router
 from cascading deletion to associated rules. See the service resource docs for
 replacement safety and examples.
+
+## Ordered ACL Policies
+
+An ordered accept collection followed by one catch-all drop needs
+`zyxel_acl_policy`: individual `zyxel_acl_rule` resources cannot maintain that
+drop across collection changes, even with `depends_on` or `-parallelism=1`.
+Read [ACL ordering, limitations and recovery](guides/acl-ordering-recovery.md)
+before using policies, migrating rows or retrying partial applies.
 
 ## Schema
 

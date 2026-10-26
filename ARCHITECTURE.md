@@ -13,6 +13,7 @@ zyxel/
     dhcp.go                     DHCP types, validation, identity, operations
     nat.go                      NAT types, validation, conflicts, operations
     acl.go                      ACL types, validation, profile, operations
+    acl_policy.go               ordered ACL tail ownership and staged reconciliation
     service.go                  reusable protocol services and compact port syntax
     firewall.go                 router-wide General and DoS settings
     lan.go                      per-group IPv4 LAN/DHCP settings
@@ -81,7 +82,8 @@ an explicit architecture decision, documentation update, and matching tests.
   relinquishes management without changing protection.
 - The API reports uncertainty; Terraform preserves recoverable identity in state.
   Direct Go callers must also reconcile before retrying uncertain writes.
-- Locks cover one client only, not other clients/processes or web-UI users.
+- Locks cover all clients with the same normalized endpoint in this process,
+  not endpoint aliases, other processes or web-UI users.
   Never automatically retry ambiguous writes.
 - LAN settings are built-in per exact group name: Create adopts and updates,
   Delete relinquishes management. Only IPv4 address/mask, IGMP snooping, and
@@ -94,6 +96,25 @@ an explicit architecture decision, documentation update, and matching tests.
   Group deletion also removes its LAN; adapters document replacement recovery.
 - Do not add undocumented PUT, toggling, reorder, or bulk replacement behavior.
   Extraction does not authorize hardware writes or expand firmware support.
+
+### Ordered ACL Policy Decision
+
+`zyxel_acl_policy` owns a contiguous tail with equivalent-scope accepts followed
+by an enabled catch-all-source drop. It reuses verified single-row POST/DELETE,
+not an undocumented reorder API. Updates stage and verify a complete new
+generation behind the old drop, then retire old accepts before the old drop.
+The staged drop exists before the old drop is removed. All steps run under the
+endpoint session lock; partial/ambiguous outcomes retain an exact ownership
+ledger and stop for operator reconciliation. Existing namespace rows require
+explicit import; prefix matches never confer ownership during create.
+
+This is a restricted policy reconciler, not arbitrary ordered firewall rules or
+an atomic transaction. Traffic scope changes are rejected. All rules share
+destination, protocol, address family, direction and port filters. Unrelated
+prefix rows must be accepts; operators must ensure these do not bypass the
+policy. Temporary loss of access and delayed revocation are possible while old
+accepts retire. Out-of-process writers remain unsupported during operations.
+Destroy deliberately removes policy protection, deleting terminal drops last.
 
 ## Development Pattern
 

@@ -70,7 +70,7 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	replaceBool := []planmodifier.Bool{boolplanmodifier.RequiresReplace()}
 	portDescription := "Port from 1 through 65535; the range end must be at least the start. Set both bounds or omit both for any port. Ports are only used by the `tcp`, `udp`, and `tcp_udp` protocols. Changing it replaces the ACL rule."
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages one firewall ACL entry in the router's `firewall_acl` table. Interface selection is fixed to `ALL`, and schedule rules are not exposed yet. The protocol can be `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name; imported rows outside this supported profile are rejected. All configurable fields require replacement because no safe in-place update or reorder operation has been verified. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.",
+		MarkdownDescription: "Manages one firewall ACL entry in the router's `firewall_acl` table. Interface selection is fixed to `ALL`, and schedule rules are not exposed yet. The protocol can be `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name; imported rows outside this supported profile are rejected. Set order for strict numeric placement, or omit it to append and compute the observed position. Rule-field changes require replacement because no safe in-place update or reorder operation has been verified; removing configured order only relinquishes numeric position management. Append cannot maintain a separate trailing drop; use zyxel_acl_policy for a supported accept collection plus drop. See the ACL ordering and recovery guide. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.",
 		Attributes: map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required: true, MarkdownDescription: "Exact, non-empty router rule name. This is the natural identity and import key; duplicate names are ambiguous.",
@@ -81,8 +81,8 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers: replaceString, Validators: []validator.String{aclActionValidator{}},
 			},
 			"order": schema.Int64Attribute{
-				Required: true, MarkdownDescription: "Explicit desired order in the router's global ACL table. Existing use of this order is rejected. Router order behavior must be verified before production use.",
-				PlanModifiers: replaceInt, Validators: []validator.Int64{aclInt64Validator{minimum: 1}},
+				Optional: true, Computed: true, MarkdownDescription: "Set a positive value for strict ordering: occupied positions are rejected and readback must match exactly. Omit (or set null) to append at max current order + 1 and record the observed firmware-assigned position, accepting compaction without replacement. Append verifies the rule is last and refuses accepts behind any enabled drop/reject or unknown action, even unrelated ones. No insertion/reorder or ongoing trailing-drop policy management is supported; see the ordering and recovery guide.",
+				PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplaceIfConfigured()}, Validators: []validator.Int64{aclInt64Validator{minimum: 1}},
 			},
 			"protocol": schema.StringAttribute{
 				Optional: true, Computed: true,
@@ -287,11 +287,25 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if unknown := unknownACLPlanAttributes(plan); len(unknown) > 0 {
+	var configuredOrder types.Int64
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("order"), &configuredOrder)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	input := plan
+	if configuredOrder.IsNull() {
+		// A computed order in a replacement plan is only an observation. Always
+		// select a fresh append position while holding the API's endpoint lock.
+		input.Order = types.Int64Null()
+	}
+	if unknown := unknownACLPlanAttributes(input); len(unknown) > 0 {
 		resp.Diagnostics.AddError("Unknown ACL rule plan values", "The router requires these ACL values to be known before creating a rule: "+strings.Join(unknown, ", "))
 		return
 	}
-	planned := modelACLRule(plan)
+	planned := modelACLRule(input)
+	if configuredOrder.IsNull() {
+		planned.OrderMode = zyxel.ACLOrderAppend
+	}
 	outcome, err := r.client.CreateACLRule(ctx, planned)
 	if err != nil {
 		if outcome.Applied || outcome.Ambiguous {
@@ -300,6 +314,9 @@ func (r *ACLRuleResource) Create(ctx context.Context, req resource.CreateRequest
 				state = aclObservedModel(*outcome.Rule, plan)
 			} else {
 				state.RouterIndex = types.Int64Null()
+				if state.Order.IsUnknown() {
+					state.Order = types.Int64Null()
+				}
 			}
 			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 		}

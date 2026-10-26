@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,13 +36,16 @@ func (Credentials) String() string   { return "Credentials{Username:[REDACTED], 
 func (Credentials) GoString() string { return "Credentials{Username:[REDACTED], Password:[REDACTED]}" }
 
 // Client serializes authenticated router operations. Construct it with NewClient;
-// its zero value is not usable. Separate clients do not share a session lock.
+// its zero value is not usable. Clients for the same normalized endpoint share
+// a process-local lock. Other processes and endpoint aliases are not coordinated.
 type Client struct {
 	endpoint    string
 	credentials Credentials
 	httpClient  *http.Client
 	sessionGate chan struct{}
 }
+
+var endpointSessionGates sync.Map
 
 // NewClient configures a client without contacting the router. Each operation
 // authenticates its own serialized session and performs best-effort logout.
@@ -53,10 +57,12 @@ func NewClient(endpoint string, credentials Credentials, timeout time.Duration) 
 	if timeout <= 0 {
 		return nil, errors.New("timeout must be positive")
 	}
+	endpoint = strings.TrimRight(endpoint, "/")
+	gate, _ := endpointSessionGates.LoadOrStore(endpoint, make(chan struct{}, 1))
 	return &Client{
-		endpoint: strings.TrimRight(endpoint, "/"), credentials: credentials,
+		endpoint: endpoint, credentials: credentials,
 		httpClient:  &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		sessionGate: make(chan struct{}, 1),
+		sessionGate: gate.(chan struct{}),
 	}, nil
 }
 

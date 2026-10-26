@@ -1,0 +1,26 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown}}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description}}
+
+Read the [ordering and recovery guide](../guides/acl-ordering-recovery.md) before
+migration, production writes or retrying a partial apply.
+
+## Example Usage
+
+{{tffile .ExampleFile}}
+
+{{.SchemaMarkdown | trimspace}}
+
+## Import
+
+Only complete provider-named generations support explicit import; arbitrary
+legacy ACL rows and partial generations cannot be adopted as a policy.
+
+{{codefile "shell" .ImportFile}}
