@@ -5,7 +5,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 > **Status: experimental.** Read paths and the mock-router lifecycle tests pass,
 > and a read-only `terraform plan` has been verified against a physical router.
-> **Live writes (NAT, DHCP, firewall ACL, services, general firewall settings) have not been verified on hardware.**
+> **Live writes (NAT, DHCP, firewall ACL, services, general firewall settings, LAN, and interface groups) have not been verified on hardware.**
 > Review every plan before applying, and keep a router configuration backup.
 
 ## Requirements
@@ -17,7 +17,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 The provider uses the public, Terraform-independent
 `github.com/VincentSchmid/terraform-provider-zyxel/zyxel` Go package. It provides
-typed status, DHCP, NAT, ACL, and firewall-settings operations, with session locking,
+typed status, DHCP, NAT, ACL, firewall-settings, LAN, and interface-group operations, with session locking,
 identity resolution, validation, and write verification. Other Go programs can
 import it without importing the Terraform adapter.
 
@@ -98,6 +98,8 @@ several Terraform processes against the router at the same time.
 | `zyxel_acl_rule` | resource | Firewall ACL entry with IPv4/IPv6, protocol, MAC, service, TCP flag, direction, and rate-limit filters |
 | `zyxel_service` | resource | Reusable firewall protocol/service object referenced by ACL ID |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
+| `zyxel_interface_group` | resource | Port-based interface groups, referenced by exact-name ID |
+| `zyxel_lan` | resource | Per-group IPv4 LAN address, IGMP snooping, DHCP server/disable/relay |
 
 Full documentation is on the
 [Terraform Registry](https://registry.terraform.io/providers/VincentSchmid/zyxel/latest/docs)
@@ -236,6 +238,58 @@ changing the current settings:
 
 ```sh
 terraform import zyxel_firewall.router router
+```
+
+## LAN Setup And Interface Groups
+
+`zyxel_lan` manages **Home Networking > LAN Setup**, excluding IPv6. Select an
+existing group with `interface_group_id = "Default"`, or create a group under
+**Network Setting > Interface Grouping** using `zyxel_interface_group`:
+
+```hcl
+resource "zyxel_interface_group" "guests" {
+  name           = "Guests"
+  wan_interfaces = ["IP.Interface.2"]
+  lan_interfaces = ["Ethernet.Interface.2", "WiFi.SSID.3"]
+}
+
+resource "zyxel_lan" "guests" {
+  interface_group_id   = zyxel_interface_group.guests.id
+  ip_address           = "192.168.20.1"
+  subnet_mask          = "255.255.255.0"
+  igmp_snooping        = "standard"
+  dhcp_mode            = "server"
+  beginning_ip_address = "192.168.20.100"
+  ending_ip_address    = "192.168.20.200"
+  auto_reserve_ip      = true
+}
+```
+
+Interface paths are router-specific, not example values to copy blindly.
+Inspect the UI's WAN list (`IpIfacePath`) and LAN port list (`IntfPath`); the API
+resolves current bridge ports before creating a group. The exact group name is
+its stable `id`, not a shifting display index. Group creation requires WAN and
+LAN members; classification criteria are outside this increment. Group changes
+replace the entry. Existing groups require import by exact name.
+
+`dhcp_mode = "disabled"` omits pool and relay fields. `dhcp_mode = "relay"`
+requires `relay_server_address` instead of the pool. `auto_reserve_ip` may be
+true only in server mode. `igmp_snooping` is `disabled`, `standard`, or `blocking`.
+LAN updates are in place; IPv6, DNS, lease time, and other settings are untouched.
+LAN destroy only stops management. Manage one LAN resource per group.
+
+**Connectivity safety:** IP/subnet, DHCP, and membership changes may disconnect
+the provider. No writes are retried automatically. If verification fails after
+a possible write, inspect the router, update the provider `host` if the address
+changed, and refresh state before retrying. Deleting/replacing an interface group
+removes its LAN configuration. Replacing a group with a dependent LAN may need
+two applies: remove both resources, then recreate both; same-name group IDs do
+not trigger a LAN reapply on their own. No live hardware was contacted or changed.
+
+```sh
+terraform import zyxel_interface_group.guests Guests
+terraform import zyxel_lan.guests Guests
+terraform import zyxel_lan.default Default
 ```
 
 ## Cloudflare IPv4 ranges

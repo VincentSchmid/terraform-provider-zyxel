@@ -5,7 +5,48 @@ Status: **partially implemented**. Provider configuration, `zyxel_status`,
 proposals remain a discussion draft; their HCL examples do not run against
 the current provider.
 
-## Implemented general firewall increment
+## Implemented IPv4 LAN And Interface Groups
+
+`zyxel_lan` manages per-group Home Networking LAN Setup: IPv4 address/mask,
+IGMP snooping (`disabled`, `standard`, `blocking`), DHCP (`server`, `disabled`,
+`relay`), server pool/auto-reserve, and relay IPv4 address. IPv6 is deferred.
+The existing exact-name group is selected by `interface_group_id`; Create adopts
+its built-in settings, Update uses allowlisted PUT, and Delete stops management.
+DNS, lease times, IPv6, and unrelated fields are neither copied nor written.
+Inactive DHCP fields are null in state and not cleared on the router.
+
+`zyxel_interface_group` implements explicit port-based groups in Network
+Setting > Interface Grouping. Its exact unique name is `id` and the import key;
+references use `interface_group_id = zyxel_interface_group.example.id`. WAN
+`IP.Interface.N` paths are validated against `wan`; LAN lower-layer paths
+(`Ethernet.Interface.N`, `WiFi.SSID.N`) resolve through `LAN_PORT_LIST_Get` to
+current bridge-port paths for POST. Creation requires WAN and LAN members,
+rejects conflicting memberships/names, and never adopts an existing group.
+Criteria-based groups and managing/deleting Default are outside this resource.
+All configurable group changes require replacement. Delete resolves its
+current Index by name within the session and verifies absence.
+
+Protocol evidence: the same pinned extracted
+[Zyxel UI app.js](https://github.com/dennis-pellanda/Antigravity-REA/blob/5b3f570e3cbb5474892a72198c83a10ed6f8d08e/work/extracted_rootfs/web/static/js/app.js)
+contains LANSetup's `LANSetupSetValue`/`apply_action`, the DHCP status screen's
+partial `lan` PUTs, `AddNewInterface`'s `okAddNewInterface`/`submit`, and
+`InterfaceGroupingContent`'s `qryifGroupObj`/`deleteHandler`. Reads use `lan`
+and `intf_group`; group GET exposes `Group_Name`, `Index`, `wanIntf`, `lanIntf`,
+and `Criteria`, while POST uses `Name`, `wanIntf`, resolved bridge `lanIntf`, and
+empty `critInfo`. Delete uses the current Index. Official series help documents
+[LAN Setup](https://service-provider.zyxel.com/compact-help/AX-DX-EX-PX-Series/AX-DX-EX-PX_5-70/h_NetworkSetting_HomeNetworking_LoopGuard.html)
+and [Interface Grouping](https://service-provider.zyxel.com/compact-help/AX-DX-EX-PX-Series/AX-DX-EX-PX_5-70/h_NetworkSetting_InterfaceGrouping_AddNew.html).
+These references do not prove exact-model or firmware compatibility.
+
+Address/subnet changes set the UI's logout flag and can prevent readback. Both
+APIs report success/uncertainty and adapters preserve names for refresh; writes
+are never automatically retried or redirected to a guessed management address.
+Group deletion also removes its LAN, so replacement with a dependent LAN may
+need staged removal/recreation, especially when the exact-name ID stays the
+same. Local encrypted API and Terraform acceptance tests cover these contracts;
+no hardware access or mutation is authorized or performed.
+
+## Implemented General Firewall Settings
 
 `zyxel_firewall` manages router-wide Firewall General and DoS settings with
 required `ipv4_enabled`, `ipv6_enabled`, `security_level` (`low`, `medium`,

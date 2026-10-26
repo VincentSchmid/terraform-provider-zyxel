@@ -1,0 +1,72 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown}}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description}}
+
+## Example Usage
+
+{{tffile .ExampleFile}}
+
+## Interface Group References
+
+Create additional groups under **Network Setting > Interface Grouping**, modeled
+by `zyxel_interface_group`. Reference the group's stable exact-name ID:
+
+```terraform
+interface_group_id = zyxel_interface_group.guests.id
+```
+
+The built-in `Default` group already exists and needs no group resource. Manage
+only one `zyxel_lan` instance per group, including across Terraform states.
+
+## DHCP Modes And Ownership
+
+- `server` corresponds to **Enable**. Set both pool addresses. They must be
+  ordered usable addresses in the LAN subnet and must not include the router IP.
+- `disabled` corresponds to **Disable**. Omit pool and relay addresses.
+- `relay` corresponds to **DHCP Relay**. Set `relay_server_address`; omit the pool.
+- `auto_reserve_ip` may be true only in `server` mode. When switching away from
+  server mode, omit it or set it to false.
+
+Inactive DHCP pool/relay fields are omitted from state. They are not cleared on
+the router; switching modes writes only the fields needed for the new mode.
+IPv6, DNS, DHCP lease time, and other settings remain outside this resource.
+IGMP snooping combines the UI's Active switch and Standard/Blocking mode into
+`disabled`, `standard`, or `blocking`.
+
+## Connectivity And Recovery
+
+Create adopts the group's existing LAN settings and updates the configured
+fields. Updates are in place, not delete/recreate. Destroy leaves the router
+unchanged. Changing `interface_group_id` relinquishes the old group and adopts
+the new one, without resetting either group's settings.
+
+Changing LAN IP/subnet, DHCP state, or group membership can disconnect clients
+and the provider. Back up the router configuration and arrange a recovery path
+before applying. The provider does not follow a changed management address or
+automatically retry writes. If a write succeeds or may have succeeded but
+readback fails, its group identity is retained. Inspect the router, update the
+provider `host` if needed, and refresh state before retrying.
+
+Deleting a `zyxel_interface_group` also removes its LAN settings. Replacing a
+group whose exact-name ID stays the same does not force its dependent LAN
+resource to be reapplied. Remove the dependent LAN and group first, then
+recreate both in a second apply. Terraform dependencies order normal creation
+and destruction but do not make changes atomic or coordinate web UI users.
+
+The protocol is based on extracted Zyxel UI code and verified with encrypted
+local mocks, not hardware writes or an exact-model/firmware compatibility check.
+
+{{.SchemaMarkdown | trimspace}}
+
+## Import
+
+Import uses the exact group name and does not change router settings:
+
+{{codefile "shell" .ImportFile}}

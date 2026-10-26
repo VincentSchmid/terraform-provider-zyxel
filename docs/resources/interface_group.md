@@ -1,0 +1,99 @@
+---
+page_title: "zyxel_interface_group Resource - zyxel"
+subcategory: ""
+description: |-
+  Manages a port-based Network Setting > Interface Grouping entry. Its exact unique name is the ID for zyxel_lan.interface_group_id. Import existing groups explicitly; changes replace the group and interrupt its network. At least one WAN and one LAN interface are required. DHCP option, MAC, and VLAN classification criteria are not supported. The built-in Default group cannot be managed here; configure it with zyxel_lan. Deletion returns member interfaces to Default and removes the group's LAN configuration. Do not use create_before_destroy with the same name or interfaces. Replacing a group with a dependent LAN resource can require two applies: remove both resources, then recreate them. Live writes remain unverified on hardware.
+---
+
+# zyxel_interface_group (Resource)
+
+Manages a port-based Network Setting > Interface Grouping entry. Its exact unique name is the ID for `zyxel_lan.interface_group_id`. Import existing groups explicitly; changes replace the group and interrupt its network. At least one WAN and one LAN interface are required. DHCP option, MAC, and VLAN classification criteria are not supported. The built-in Default group cannot be managed here; configure it with `zyxel_lan`. Deletion returns member interfaces to Default and removes the group's LAN configuration. Do not use create_before_destroy with the same name or interfaces. Replacing a group with a dependent LAN resource can require two applies: remove both resources, then recreate them. Live writes remain unverified on hardware.
+
+## Example Usage
+
+```terraform
+# Interface paths depend on your router. Obtain WAN IpIfacePath values from
+# its WAN interface list and LAN IntfPath values from its LAN port list.
+resource "zyxel_interface_group" "guests" {
+  name           = "Guests"
+  wan_interfaces = ["IP.Interface.2"]
+  lan_interfaces = ["Ethernet.Interface.2", "WiFi.SSID.3"]
+}
+
+resource "zyxel_lan" "guests" {
+  interface_group_id   = zyxel_interface_group.guests.id
+  ip_address           = "192.168.20.1"
+  subnet_mask          = "255.255.255.0"
+  igmp_snooping        = "standard"
+  dhcp_mode            = "server"
+  beginning_ip_address = "192.168.20.100"
+  ending_ip_address    = "192.168.20.200"
+  auto_reserve_ip      = true
+}
+```
+
+## Scope And Interface Selection
+
+This is the **Network Setting > Interface Grouping** screen, separate from
+**Home Networking > LAN Setup**. This increment supports explicit port-based
+groups: at least one WAN interface and at least one LAN Ethernet port or WiFi
+SSID. DHCP option 60/61/125, source-MAC, and VLAN-group classification criteria
+are not supported; importing or deleting a criteria-based group is refused.
+
+Use router interface paths, not display indexes or guessed bridge ports.
+The WAN list (`wan`) exposes `IpIfacePath`, such as `IP.Interface.2`.
+The UI's `/cgi-bin/LAN_PORT_LIST_Get` exposes LAN `IntfPath`, such as
+`Ethernet.Interface.2` or `WiFi.SSID.3`. These paths are router-specific;
+inspect existing authenticated UI network responses to find them. The provider
+resolves LAN paths to current `BrPortPath` values inside its locked session.
+It never stores bridge-port paths or raw router responses in Terraform state.
+
+Creation rejects a name collision and interfaces assigned to another
+non-default group. Existing groups require explicit import. The built-in
+`Default` group is not a creatable/deletable entry; configure its LAN settings
+directly with `zyxel_lan.interface_group_id = "Default"`.
+
+## Identity And Lifecycle
+
+The exact unique group name is both `id` and the import key. Reference it with
+`interface_group_id = zyxel_interface_group.guests.id`. `router_index` is only
+an observation; deletion resolves the current index by name and rejects
+duplicate names rather than guessing. A group removed outside Terraform is
+removed from state on refresh.
+
+All configurable changes replace the group. This interrupts its network and
+deletes its LAN configuration; interfaces return to Default on deletion. Do not
+use `create_before_destroy` with an overlapping name or member interface.
+Replacing a group while managing its LAN can require two applies: remove the
+dependent LAN and group first, then recreate both. In particular, replacing
+members without changing the exact-name ID does not trigger a LAN reapply.
+
+Creation that succeeded or may have succeeded preserves its name in state even
+if verification fails. Inspect and refresh before retrying. Writes are not
+automatically retried. Locks serialize only one client, not other Terraform
+states, processes, or router UI users. Back up configuration and arrange a
+recovery path before changing networking. This is not a firewall isolation
+policy; review routing and firewall rules separately.
+
+The protocol is based on extracted Zyxel UI code and verified with encrypted
+local mocks, not hardware writes or an exact-model/firmware compatibility check.
+
+<!-- schema generated by tfplugindocs -->
+## Schema
+
+### Required
+
+- `lan_interfaces` (Set of String) LAN lower-layer paths, for example `Ethernet.Interface.2` or `WiFi.SSID.3`. The API resolves current bridge ports automatically. Must not belong to another non-default group. Changes replace the group.
+- `name` (String) Exact unique group name and import key. Default is reserved. Changes replace the group.
+- `wan_interfaces` (Set of String) WAN interface paths, for example `IP.Interface.2`, obtained from the router WAN interface list. Must resolve uniquely and not belong to another non-default group. Changes replace the group.
+
+### Read-Only
+
+- `id` (String) Stable ID: exact group name, suitable for `zyxel_lan.interface_group_id`. Not a router row index.
+- `router_index` (Number) Current display index for diagnostics only. Refreshed by name before deletion; never a durable identity.
+
+## Import
+
+```shell
+terraform import zyxel_interface_group.guests Guests
+```

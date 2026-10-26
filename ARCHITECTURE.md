@@ -15,6 +15,8 @@ zyxel/
     acl.go                      ACL types, validation, profile, operations
     service.go                  reusable protocol services and compact port syntax
     firewall.go                 router-wide General and DoS settings
+    lan.go                      per-group IPv4 LAN/DHCP settings
+    interface_group.go          port-based groups and bridge-port resolution
     *_test.go                   API tests and public usage example
 internal/
     provider/
@@ -81,6 +83,15 @@ an explicit architecture decision, documentation update, and matching tests.
   Direct Go callers must also reconcile before retrying uncertain writes.
 - Locks cover one client only, not other clients/processes or web-UI users.
   Never automatically retry ambiguous writes.
+- LAN settings are built-in per exact group name: Create adopts and updates,
+  Delete relinquishes management. Only IPv4 address/mask, IGMP snooping, and
+  active DHCP mode fields are written; IPv6/DNS/lease settings are not copied.
+  IP/subnet changes may disconnect the client; retain identity for recovery.
+- Port-based interface groups use exact names as stable IDs, never display
+  indexes. Create resolves WAN and LAN interface paths inside the session and
+  translates LAN members to current bridge ports. Delete resolves the current
+  display index, protects Default, and rejects duplicate names/criteria groups.
+  Group deletion also removes its LAN; adapters document replacement recovery.
 - Do not add undocumented PUT, toggling, reorder, or bulk replacement behavior.
   Extraction does not authorize hardware writes or expand firmware support.
 
