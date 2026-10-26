@@ -1,0 +1,1 @@
+terraform import zyxel_interface_group.guests Guests

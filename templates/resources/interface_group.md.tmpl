@@ -1,0 +1,66 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown}}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description}}
+
+## Example Usage
+
+{{tffile .ExampleFile}}
+
+## Scope And Interface Selection
+
+This is the **Network Setting > Interface Grouping** screen, separate from
+**Home Networking > LAN Setup**. This increment supports explicit port-based
+groups: at least one WAN interface and at least one LAN Ethernet port or WiFi
+SSID. DHCP option 60/61/125, source-MAC, and VLAN-group classification criteria
+are not supported; importing or deleting a criteria-based group is refused.
+
+Use router interface paths, not display indexes or guessed bridge ports.
+The WAN list (`wan`) exposes `IpIfacePath`, such as `IP.Interface.2`.
+The UI's `/cgi-bin/LAN_PORT_LIST_Get` exposes LAN `IntfPath`, such as
+`Ethernet.Interface.2` or `WiFi.SSID.3`. These paths are router-specific;
+inspect existing authenticated UI network responses to find them. The provider
+resolves LAN paths to current `BrPortPath` values inside its locked session.
+It never stores bridge-port paths or raw router responses in Terraform state.
+
+Creation rejects a name collision and interfaces assigned to another
+non-default group. Existing groups require explicit import. The built-in
+`Default` group is not a creatable/deletable entry; configure its LAN settings
+directly with `zyxel_lan.interface_group_id = "Default"`.
+
+## Identity And Lifecycle
+
+The exact unique group name is both `id` and the import key. Reference it with
+`interface_group_id = zyxel_interface_group.guests.id`. `router_index` is only
+an observation; deletion resolves the current index by name and rejects
+duplicate names rather than guessing. A group removed outside Terraform is
+removed from state on refresh.
+
+All configurable changes replace the group. This interrupts its network and
+deletes its LAN configuration; interfaces return to Default on deletion. Do not
+use `create_before_destroy` with an overlapping name or member interface.
+Replacing a group while managing its LAN can require two applies: remove the
+dependent LAN and group first, then recreate both. In particular, replacing
+members without changing the exact-name ID does not trigger a LAN reapply.
+
+Creation that succeeded or may have succeeded preserves its name in state even
+if verification fails. Inspect and refresh before retrying. Writes are not
+automatically retried. Locks serialize only one client, not other Terraform
+states, processes, or router UI users. Back up configuration and arrange a
+recovery path before changing networking. This is not a firewall isolation
+policy; review routing and firewall rules separately.
+
+The protocol is based on extracted Zyxel UI code and verified with encrypted
+local mocks, not hardware writes or an exact-model/firmware compatibility check.
+
+{{.SchemaMarkdown | trimspace}}
+
+## Import
+
+{{codefile "shell" .ImportFile}}
