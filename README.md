@@ -219,7 +219,7 @@ Import examples:
 terraform import zyxel_nat_rule.https 'HTTPS'
 terraform import zyxel_acl_rule.cloudflare 'Cloudflare-104.16.0.0-13'
 terraform import zyxel_dhcp_reservation.nas '02:00:00:00:00:20'
-terraform import zyxel_acl_policy.https 'HTTPS-Sources/0123456789abcdef'
+terraform import zyxel_acl_policy.https '0123456789abcdef'
 ```
 
 ## ACL Ordering And Policies
@@ -232,11 +232,13 @@ does not support adding accepts after that drop already exists.
 
 For a dynamic accept list followed by drops/rejects, use `zyxel_acl_policy`
 with ordered `rules` and required `drop_rules`; see
-[the example](examples/resources/zyxel_acl_policy/resource.tf). The effective
-order is every accept, then every drop/reject, so accepts can never follow a
-deny. Each rule may set its own `service` name or `service_id` instead of an
-inline `protocol` and ports; those rows are created through the same ACL rule
-write path.
+[the example](examples/resources/zyxel_acl_policy/resource.tf). There is no
+policy name; each rule may carry an optional `name`. Named rows are
+`<rule-name>-g<2hex>` and unnamed rows are `g<2hex>-<NN>`. The effective order is
+every accept, then every drop/reject, so accepts can never follow a deny. Each
+rule may set its own `service` name or `service_id` instead of an inline
+`protocol` and ports; those rows are created through the same ACL rule write
+path.
 It stages and verifies a new generation behind the old tail before retiring old
 accepts and finally the old drops/rejects. This supports collection growth and
 shrink without an undocumented router reorder operation. It still owns only a

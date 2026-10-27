@@ -35,6 +35,10 @@ type terraformACLFixture struct {
 	forceOrder          bool
 	compactOrders       bool
 	rejectOccupiedOrder bool
+	maxACLRows          int
+	// capacityResult is the rejection the firmware returns for a create at
+	// capacity. Empty means the generic parameter rejection.
+	capacityResult      string
 	mutateCreate        func(map[string]any)
 	activeSessions      int
 	maxActiveSessions   int
@@ -222,6 +226,16 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 		switch r.Method {
 		case http.MethodPost:
 			f.requestedOrders = append(f.requestedOrders, fixtureInt(body["Order"]))
+			if f.maxACLRows > 0 && len(f.rows) >= f.maxACLRows {
+				// Both codes were observed from V5.17 hardware at the 32-row
+				// limit; the capacity fallback must handle either.
+				result := f.capacityResult
+				if result == "" {
+					result = "ZCFG_INVALID_PARAM_VALUE"
+				}
+				f.reply(w, s, map[string]any{"result": result})
+				return
+			}
 			if f.rejectOccupiedOrder {
 				for _, row := range f.rows {
 					if fixtureInt(row["Order"]) == fixtureInt(body["Order"]) {

@@ -26,6 +26,25 @@ const (
 
 var ErrACLRuleNotFound = errors.New("ACL rule not found")
 
+// ACLWriteRejectedError reports the firmware's explicit ACL write rejection.
+type ACLWriteRejectedError struct {
+	Method, OID, Result string
+}
+
+func (e *ACLWriteRejectedError) Error() string {
+	return fmt.Sprintf("router rejected ACL %s for %s: %s", e.Method, e.OID, e.Result)
+}
+
+func aclResultCode(response map[string]any) string {
+	code, ok := response["result"].(string)
+	if !ok || !strings.HasPrefix(code, "ZCFG_") || len(code) > 80 || strings.IndexFunc(code, func(r rune) bool {
+		return r != '_' && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	}) >= 0 {
+		return "unknown result"
+	}
+	return code
+}
+
 type ACLRule struct {
 	Name   string
 	Action string
@@ -170,7 +189,7 @@ func (s *routerSession) createACLRule(ctx context.Context, rule ACLRule, policyS
 			return err
 		}
 		if response["result"] != "ZCFG_SUCCESS" {
-			return errors.New("router rejected the ACL rule create request")
+			return &ACLWriteRejectedError{Method: http.MethodPost, OID: firewallACLOID, Result: aclResultCode(response)}
 		}
 		outcome.Applied = true
 
@@ -287,7 +306,7 @@ func (s *routerSession) deleteACLRule(ctx context.Context, name string) error {
 		return err
 	}
 	if response["result"] != "ZCFG_SUCCESS" {
-		return errors.New("router rejected the ACL rule delete request")
+		return &ACLWriteRejectedError{Method: http.MethodDelete, OID: firewallACLOID, Result: aclResultCode(response)}
 	}
 	rows, err = s.readACLRows(ctx)
 	if err != nil {

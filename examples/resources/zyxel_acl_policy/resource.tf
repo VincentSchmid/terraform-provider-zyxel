@@ -17,8 +17,6 @@ locals {
 # rule is required. Review unrelated prefix accepts for overlap before creating
 # this tail policy. Do not manage generated rows individually.
 resource "zyxel_acl_policy" "https" {
-  name = "HTTPS-Sources"
-
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
       action      = "accept"
@@ -52,8 +50,6 @@ locals {
 }
 
 resource "zyxel_acl_policy" "https_service" {
-  name = "HTTPS-Service-Sources"
-
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
       action      = "accept"
@@ -70,10 +66,9 @@ resource "zyxel_acl_policy" "https_service" {
 # Mixed-scope accepts are allowed; one or more drops follow them. The effective
 # order is the accept list, then the drop list.
 resource "zyxel_acl_policy" "mixed" {
-  name = "Mixed-Services"
-
   rules = [
     {
+      name              = "WebDAV"
       action            = "accept"
       protocol          = "tcp"
       ip_version        = "ipv4"
@@ -83,6 +78,7 @@ resource "zyxel_acl_policy" "mixed" {
       destination_ports = "5006"
     },
     {
+      name              = "VPN"
       action            = "accept"
       protocol          = "udp"
       ip_version        = "ipv4"
@@ -95,6 +91,7 @@ resource "zyxel_acl_policy" "mixed" {
 
   drop_rules = [
     {
+      name             = "Deny"
       action           = "drop"
       protocol         = "all"
       ip_version       = "ipv4"

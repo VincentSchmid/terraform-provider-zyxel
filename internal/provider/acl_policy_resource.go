@@ -12,7 +12,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -22,14 +21,30 @@ var (
 	_ resource.ResourceWithConfigure      = &ACLPolicyResource{}
 	_ resource.ResourceWithValidateConfig = &ACLPolicyResource{}
 	_ resource.ResourceWithImportState    = &ACLPolicyResource{}
+	_ resource.ResourceWithModifyPlan     = &ACLPolicyResource{}
+	_ resource.ResourceWithUpgradeState   = &ACLPolicyResource{}
 )
 
 func NewACLPolicyResource() resource.Resource { return &ACLPolicyResource{} }
 
 type ACLPolicyResource struct{ client *zyxel.Client }
 
+// Refresh records pending reconciliation privately; making the generation
+// unknown ensures apply runs even when configuration still matches prior state.
+func (r *ACLPolicyResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() || req.Private == nil {
+		return
+	}
+	pending, d := req.Private.GetKey(ctx, "acl_recovery_pending")
+	resp.Diagnostics.Append(d...)
+	if string(pending) == "true" {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("generation"), types.StringUnknown())...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("row_names"), types.ListUnknown(types.StringType))...)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("observed_orders"), types.ListUnknown(types.Int64Type))...)
+	}
+}
+
 type aclPolicyModel struct {
-	Name           types.String         `tfsdk:"name"`
 	Rules          []aclPolicyRuleModel `tfsdk:"rules"`
 	DropRules      []aclPolicyRuleModel `tfsdk:"drop_rules"`
 	Generation     types.String         `tfsdk:"generation"`
@@ -38,6 +53,7 @@ type aclPolicyModel struct {
 }
 
 type aclPolicyRuleModel struct {
+	Name             types.String `tfsdk:"name"`
 	Action           types.String `tfsdk:"action"`
 	Protocol         types.String `tfsdk:"protocol"`
 	Service          types.String `tfsdk:"service"`
@@ -60,9 +76,9 @@ func (*ACLPolicyResource) Metadata(_ context.Context, req resource.MetadataReque
 
 func (*ACLPolicyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. Migrating from the earlier single-list shape means moving the former final `drop` from `rules` to `drop_rules`; existing state remains readable and no state upgrader is used. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.",
+		Version:             1,
+		MarkdownDescription: "Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. There is no policy name; each rule may carry an optional `name`. Named rows are `<rule-name>-g<2hex>`; unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex and legacy 16-hex tokens and `ACL-<16hex>-<NN>` rows remain readable. Ownership comes only from the exact `row_names` ledger, never from a name prefix. Changing a rule's `name` stages a new generation and retires the old rows. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. At the observed 32-row limit, an explicit capacity rejection can retire old rows early (accepts before drops) to finish staging. Early drop retirement leaves protection incomplete until the new drops are created; a failure can extend this window until recovery. Refresh preserves verified partial ownership without router writes; the next apply reconciles tracked rows and rebuilds the policy, even with unchanged configuration. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.",
 		Attributes: map[string]schema.Attribute{
-			"name": schema.StringAttribute{Required: true, MarkdownDescription: "Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-01, -02, etc.; three-digit suffixes from v2 providers remain readable. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.", PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()}},
 			"rules": schema.ListNestedAttribute{
 				Optional: true, MarkdownDescription: "Ordered accept rules, evaluated before every entry in `drop_rules`. Each entry must have `action = \"accept\"`. Rules may have different protocols, services, address families, directions, destinations and ports. No numeric order is configured.",
 				NestedObject: aclPolicyRuleObject(),
@@ -80,6 +96,7 @@ func (*ACLPolicyResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 
 func aclPolicyRuleObject() schema.NestedAttributeObject {
 	return schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
+		"name": schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across both lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows."},
 		"action": schema.StringAttribute{
 			Required: true, MarkdownDescription: "`accept` in `rules`; `drop` or `reject` in `drop_rules`.",
 			Validators: []validator.String{aclActionValidator{}},
@@ -148,13 +165,11 @@ func (r *ACLPolicyResource) Configure(_ context.Context, req resource.ConfigureR
 // drop/reject. Rule creation, service resolution and verification stay in the
 // shared ACL rule write path.
 func modelACLPolicy(model aclPolicyModel) (zyxel.ACLPolicy, bool) {
-	p := zyxel.ACLPolicy{Name: model.Name.ValueString()}
-	known := !model.Name.IsUnknown()
-	index := 0
+	var p zyxel.ACLPolicy
+	known := true
 	appendRules := func(rules []aclPolicyRuleModel) {
 		for _, m := range rules {
-			index++
-			for _, v := range []types.String{m.Action, m.IPVersion, m.Direction, m.SourceCIDR, m.DestinationCIDR, m.SourcePorts, m.DestinationPorts, m.Service, m.ServiceID, m.MACAddress, m.TCPFlag, m.RateLimitUnit} {
+			for _, v := range []types.String{m.Name, m.Action, m.IPVersion, m.Direction, m.SourceCIDR, m.DestinationCIDR, m.SourcePorts, m.DestinationPorts, m.Service, m.ServiceID, m.MACAddress, m.TCPFlag, m.RateLimitUnit} {
 				known = known && !v.IsUnknown()
 			}
 			known = known && !m.PacketsPerUnit.IsUnknown()
@@ -168,7 +183,7 @@ func modelACLPolicy(model aclPolicyModel) (zyxel.ACLPolicy, bool) {
 			}
 			known = known && !protocol.IsUnknown()
 			rule := zyxel.ACLRule{
-				Name: fmt.Sprintf("rule-%02d", index), Action: m.Action.ValueString(), Enabled: true,
+				Name: m.Name.ValueString(), Action: m.Action.ValueString(), Enabled: true,
 				Protocol: protocol.ValueString(), Service: m.Service.ValueString(), ServiceID: m.ServiceID.ValueString(),
 				IPVersion: m.IPVersion.ValueString(), Direction: m.Direction.ValueString(),
 				SourceCIDR: m.SourceCIDR.ValueString(), DestinationCIDR: m.DestinationCIDR.ValueString(),
@@ -261,6 +276,9 @@ func (*ACLPolicyResource) ValidateConfig(ctx context.Context, req resource.Valid
 	validate := func(listName string, entries []aclPolicyRuleModel, want func(string) bool, actionMessage string) {
 		for i, m := range entries {
 			at := func(name string) path.Path { return path.Root(listName).AtListIndex(i).AtName(name) }
+			if !m.Name.IsNull() && !m.Name.IsUnknown() && m.Name.ValueString() == "" {
+				resp.Diagnostics.AddAttributeError(at("name"), "Empty rule name", "Omit name for an unnamed rule, or provide a non-empty logical name.")
+			}
 			if !m.Action.IsNull() && !m.Action.IsUnknown() && !want(m.Action.ValueString()) {
 				resp.Diagnostics.AddAttributeError(at("action"), "Invalid action for this list", actionMessage)
 			}
@@ -282,7 +300,7 @@ func (*ACLPolicyResource) ValidateConfig(ctx context.Context, req resource.Valid
 				if !m.TCPFlag.IsNull() && !m.TCPFlag.IsUnknown() {
 					resp.Diagnostics.AddAttributeError(at("tcp_flag"), "Conflicting service filter", "service_id cannot be combined with a TCP flag.")
 				}
-			} else if (m.Service.IsNull() || m.Service.IsUnknown()) && (m.Protocol.IsNull() || m.Protocol.IsUnknown()) {
+			} else if m.ServiceID.IsNull() && m.Service.IsNull() && m.Protocol.IsNull() {
 				resp.Diagnostics.AddAttributeError(at("protocol"), "Missing inline protocol", "Set an inline `protocol`, or set `service`/`service_id` so the service selects the protocol.")
 			}
 			if !m.PacketsPerUnit.IsNull() && !m.PacketsPerUnit.IsUnknown() && !m.Action.IsNull() && !m.Action.IsUnknown() && m.Action.ValueString() != "accept" {
@@ -306,9 +324,12 @@ func (*ACLPolicyResource) ValidateConfig(ctx context.Context, req resource.Valid
 
 func policyLedger(ctx context.Context, model aclPolicyModel) (zyxel.ACLPolicyState, diag.Diagnostics) {
 	p, _ := modelACLPolicy(model)
-	s := zyxel.ACLPolicyState{Name: p.Name, Generation: model.Generation.ValueString()}
+	s := zyxel.ACLPolicyState{Generation: model.Generation.ValueString()}
 	diagnostics := model.RowNames.ElementsAs(ctx, &s.Names, false)
 	for i, r := range p.Rules {
+		if i >= len(s.Names) {
+			break
+		}
 		r.SourcePortStart, r.SourcePortEnd, _ = zyxel.ParsePorts(r.SourcePorts)
 		r.DestinationPortStart, r.DestinationPortEnd, _ = zyxel.ParsePorts(r.DestinationPorts)
 		r.SourcePorts, r.DestinationPorts = "", ""
@@ -376,12 +397,23 @@ func (r *ACLPolicyResource) Read(ctx context.Context, req resource.ReadRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	observed, err := r.client.ReadACLPolicy(ctx, ledger)
+	recovery, err := r.client.InspectACLPolicyRecovery(ctx, ledger)
 	if err != nil {
 		resp.Diagnostics.AddError("ACL policy requires reconciliation", err.Error()+" Preserve state and inspect all tracked rows before retrying.")
 		return
 	}
-	resp.Diagnostics.Append(recordPolicyLedger(ctx, &model, observed)...)
+	if resp.Private != nil {
+		pending := []byte(nil)
+		if recovery.Pending {
+			pending = []byte("true")
+		}
+		resp.Diagnostics.Append(resp.Private.SetKey(ctx, "acl_recovery_pending", pending)...)
+	}
+	if recovery.Pending {
+		resp.Diagnostics.AddWarning("ACL policy recovery scheduled", "A partial ownership ledger was verified without router writes. The next apply will reconcile the tracked rows and rebuild the desired policy. This can interrupt traffic and temporarily remove deny protection.")
+		return
+	}
+	resp.Diagnostics.Append(recordPolicyLedger(ctx, &model, recovery.State)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &model)...)
 }
 
@@ -416,6 +448,9 @@ func (r *ACLPolicyResource) Update(ctx context.Context, req resource.UpdateReque
 	}
 	resp.Diagnostics.Append(recordPolicyLedger(ctx, &plan, out.State)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if resp.Private != nil {
+		resp.Diagnostics.Append(resp.Private.SetKey(ctx, "acl_recovery_pending", nil)...)
+	}
 }
 
 func (r *ACLPolicyResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -443,26 +478,31 @@ func (r *ACLPolicyResource) ImportState(ctx context.Context, req resource.Import
 		resp.Diagnostics.AddError("Unconfigured Zyxel provider", "The Zyxel provider client is not configured.")
 		return
 	}
-	name, generation, ok := strings.Cut(req.ID, "/")
-	if !ok {
-		resp.Diagnostics.AddError("Invalid ACL policy import", "Import ID must be policy-name/generation. Only complete provider-named generations are supported.")
-		return
+	generation := req.ID
+	if _, legacy, ok := strings.Cut(req.ID, "/"); ok {
+		// Released providers accepted name/generation; the name no longer
+		// identifies an owner, so keep reading that form but ignore the name.
+		generation = legacy
 	}
-	observed, err := r.client.ImportACLPolicy(ctx, name, generation)
+	observed, err := r.client.ImportACLPolicy(ctx, generation)
 	if err != nil {
 		resp.Diagnostics.AddError("Error importing ACL policy", err.Error())
 		return
 	}
-	model := aclPolicyModel{Name: types.StringValue(name)}
-	for _, rule := range observed.Rules {
+	model := aclPolicyModel{}
+	for i, rule := range observed.Rules {
 		m := aclPolicyRuleModel{
+			Name:   types.StringNull(),
 			Action: types.StringValue(rule.Action), Protocol: types.StringValue(rule.Protocol),
 			IPVersion: types.StringValue(rule.IPVersion), Direction: types.StringValue(rule.Direction),
 			SourceCIDR: types.StringValue(rule.SourceCIDR), DestinationCIDR: types.StringValue(rule.DestinationCIDR),
 			SourcePorts: types.StringNull(), DestinationPorts: types.StringNull(),
 			Service: types.StringNull(), ServiceID: types.StringNull(),
 			MACAddress: types.StringNull(), TCPFlag: types.StringNull(),
-			PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringNull(),
+			PacketsPerUnit: types.Int64Null(), RateLimitUnit: types.StringValue("minute"),
+		}
+		if observed.LogicalNames[i] != "" {
+			m.Name = types.StringValue(observed.LogicalNames[i])
 		}
 		if rule.Service != "" && rule.ServiceID == "" {
 			// Some legacy rows expose only a service name. Native-ID rules keep

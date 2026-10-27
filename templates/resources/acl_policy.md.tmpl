@@ -20,7 +20,11 @@ migration, production writes or retrying a partial apply.
 
 ## Import
 
-Only complete provider-named generations support explicit import; arbitrary
-legacy ACL rows and partial generations cannot be adopted as a policy.
+Only complete generations support explicit import; arbitrary ACL rows and
+partial generations cannot be adopted as a policy. Import by bare generation,
+for example `terraform import zyxel_acl_policy.https '7f'`. The legacy
+`name/generation` form is still accepted but the name is ignored. Current
+two-hex, earlier four-hex and legacy 16-hex generation tokens are accepted.
+Import restores optional logical rule names; unnamed rows retain null names.
 
 {{codefile "shell" .ImportFile}}

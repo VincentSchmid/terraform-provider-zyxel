@@ -3,12 +3,12 @@
 page_title: "zyxel_acl_policy Resource - zyxel"
 subcategory: ""
 description: |-
-  Manages the ordered ACL tail for a router. rules holds accepts; drop_rules holds the drops/rejects applied after every accept. The effective order is every rules entry in list order, then every drop_rules entry in list order. At least one drop/reject is required. Migrating from the earlier single-list shape means moving the former final drop from rules to drop_rules; existing state remains readable and no state upgrader is used. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
+  Manages the ordered ACL tail for a router. rules holds accepts; drop_rules holds the drops/rejects applied after every accept. The effective order is every rules entry in list order, then every drop_rules entry in list order. At least one drop/reject is required. There is no policy name; each rule may carry an optional name. Named rows are <rule-name>-g<2hex>; unnamed rows are g<2hex>-<NN>. Earlier 4-hex and legacy 16-hex tokens and ACL-<16hex>-<NN> rows remain readable. Ownership comes only from the exact row_names ledger, never from a name prefix. Changing a rule's name stages a new generation and retires the old rows. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. At the observed 32-row limit, an explicit capacity rejection can retire old rows early (accepts before drops) to finish staging. Early drop retirement leaves protection incomplete until the new drops are created; a failure can extend this window until recovery. Refresh preserves verified partial ownership without router writes; the next apply reconciles tracked rows and rebuilds the policy, even with unchanged configuration. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
 ---
 
 # zyxel_acl_policy (Resource)
 
-Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. Migrating from the earlier single-list shape means moving the former final `drop` from `rules` to `drop_rules`; existing state remains readable and no state upgrader is used. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
+Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. There is no policy name; each rule may carry an optional `name`. Named rows are `<rule-name>-g<2hex>`; unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex and legacy 16-hex tokens and `ACL-<16hex>-<NN>` rows remain readable. Ownership comes only from the exact `row_names` ledger, never from a name prefix. Changing a rule's `name` stages a new generation and retires the old rows. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. At the observed 32-row limit, an explicit capacity rejection can retire old rows early (accepts before drops) to finish staging. Early drop retirement leaves protection incomplete until the new drops are created; a failure can extend this window until recovery. Refresh preserves verified partial ownership without router writes; the next apply reconciles tracked rows and rebuilds the policy, even with unchanged configuration. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
 
 ## Example Usage
 
@@ -32,8 +32,6 @@ locals {
 # rule is required. Review unrelated prefix accepts for overlap before creating
 # this tail policy. Do not manage generated rows individually.
 resource "zyxel_acl_policy" "https" {
-  name = "HTTPS-Sources"
-
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
       action      = "accept"
@@ -67,8 +65,6 @@ locals {
 }
 
 resource "zyxel_acl_policy" "https_service" {
-  name = "HTTPS-Service-Sources"
-
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
       action      = "accept"
@@ -85,10 +81,9 @@ resource "zyxel_acl_policy" "https_service" {
 # Mixed-scope accepts are allowed; one or more drops follow them. The effective
 # order is the accept list, then the drop list.
 resource "zyxel_acl_policy" "mixed" {
-  name = "Mixed-Services"
-
   rules = [
     {
+      name              = "WebDAV"
       action            = "accept"
       protocol          = "tcp"
       ip_version        = "ipv4"
@@ -98,6 +93,7 @@ resource "zyxel_acl_policy" "mixed" {
       destination_ports = "5006"
     },
     {
+      name              = "VPN"
       action            = "accept"
       protocol          = "udp"
       ip_version        = "ipv4"
@@ -110,6 +106,7 @@ resource "zyxel_acl_policy" "mixed" {
 
   drop_rules = [
     {
+      name             = "Deny"
       action           = "drop"
       protocol         = "all"
       ip_version       = "ipv4"
@@ -127,7 +124,6 @@ resource "zyxel_acl_policy" "mixed" {
 ### Required
 
 - `drop_rules` (Attributes List) Ordered drop/reject rules, evaluated after every accept. Each entry must have `action = "drop"` or `"reject"`; at least one entry is required so a policy cannot silently omit its deny coverage. Rules may have different scopes. (see [below for nested schema](#nestedatt--drop_rules))
-- `name` (String) Policy namespace (1-48 bytes). Router rows are named <name>-g<random-generation>-01, -02, etc.; three-digit suffixes from v2 providers remain readable. The entire namespace is reserved; existing rows are never automatically adopted. Changing it requires replacement.
 
 ### Optional
 
@@ -154,6 +150,7 @@ Optional:
 
 - `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
 - `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
+- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across both lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
 - `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
 - `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
 - `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
@@ -177,6 +174,7 @@ Optional:
 
 - `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
 - `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
+- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across both lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
 - `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
 - `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
 - `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
@@ -192,5 +190,5 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-terraform import zyxel_acl_policy.https 'HTTPS-Sources/0123456789abcdef'
+terraform import zyxel_acl_policy.https '7f'
 ```

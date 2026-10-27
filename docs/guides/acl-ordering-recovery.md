@@ -33,11 +33,25 @@ The effective order is `concat(rules, drop_rules)`. Separate lists make drops
 explicit, so a policy cannot silently forget its deny coverage, and no accept
 can be written after a drop. See
 `examples/resources/zyxel_acl_policy/resource.tf`. Zero accepts plus one drop is
-supported, up to 999 rules total. New names are `<policy>-g<generation>-01`,
-`-02`, etc.; positions 100 and above naturally use a third digit. Generations
-written by earlier v2 providers with three-digit suffixes remain readable,
-importable and retirable. Exact generated names are stored in `row_names`;
-prefix matching never grants ownership during create.
+supported, up to 999 rules total. There is no policy name: each entry in `rules`
+and `drop_rules` accepts an optional `name`, and the effective order is the
+ledger order. A named rule `WebDAV` in generation `7f` becomes the router row
+`WebDAV-g7f`; an unnamed rule becomes `g7f-01`, then `g7f-02`, etc.
+Positions 100 and above naturally use three digits. Labels use ASCII letters,
+digits, underscores or hyphens, must not have surrounding whitespace, and must
+be unique across both lists; a label may itself contain `-` and `g`. Unnamed
+entries keep null names in state. Renaming a rule stages a new generation and
+retires the old rows. Import restores labels and leaves unnamed entries null.
+The random token is two lowercase hexadecimal characters; allocation compares
+parsed generation tokens in live and tracked names before any writes and retries
+collisions at most 32 times. Earlier 4-hex tokens, 16-hex tokens and legacy
+`ACL-g<16hex>-01` names remain readable, importable and retirable; their
+arbitrary prefix is ignored. Exact generated names are stored in `row_names`,
+and ownership comes only from that ledger. Never infer ownership from a name,
+including from a generation token. Keep labels short because the firmware total
+name-length limit is unknown. Released state that still contains a root `name`
+upgrades automatically: that name is dropped and `rules`, `drop_rules`,
+`generation`, `row_names` and `observed_orders` are copied verbatim.
 
 The earlier policy shape used one `rules` list whose final entry was the drop.
 Existing state remains readable because `row_names`, `observed_orders` and the
@@ -61,7 +75,7 @@ The policy must own a contiguous table tail after an unrelated prefix. Prefix
 rules must be accepts or disabled. Operators must review them for overlap: a
 broad earlier accept can bypass the policy drops. The provider does not prove
 that arbitrary unmanaged prefix rules are unrelated. Interleaved/following rows,
-untracked namespace rows, duplicates, missing rules and security drift cause
+untracked generation rows, duplicates, missing rules and security drift cause
 refusal instead of blind reconstruction/adoption. Only one such tail policy can
 be managed per router. Do not place another policy or independent rule after it,
 including through another Terraform state.
@@ -85,14 +99,18 @@ direction. Traffic may be blocked as old accepts retire before the old drops.
 Connection tracking is firmware-dependent. Initial creation has no old policy
 drop: existing router/default protection matters, and a partial initial create
 can leave accepts without their intended drops. Staging needs temporary capacity
-for both generations; failure stops without retiring the old policy. Never
+for both generations; capacity fallback may retire old rows early. Never
 promise uninterrupted access, instant revocation or automatic rollback.
 
 Accepted/ambiguous POSTs are recorded by exact name even if readback fails.
 Partial updates preserve names from both generations. Incomplete ownership
-ledgers stop refresh/reconciliation with an error for operator recovery, rather
-than disguising a damaged policy as absent. There are no blind retries or
-automatic cleanup writes. Destroy deletes only tracked names, accepts before
+ledgers are inspected without writes during refresh. A verified partial ledger
+keeps its ownership inventory and schedules reconciliation on the next apply,
+even if configuration has returned to its previous values. Reconciliation
+removes only exact tracked rows before rebuilding the desired generation;
+accepts retire before drops. This can interrupt access and temporarily remove
+deny protection. Unknown-generation rows, duplicates, unsupported profiles or
+interleaved unrelated rows still block recovery. Destroy deletes only tracked names, accepts before
 drops, and **removes policy protection**; review resulting defaults first.
 
 One process-local lock covers login, table selection, writes, verification,
@@ -107,12 +125,18 @@ it. No lock survives a process crash. Hardware writes remain unverified.
 The [Zyxel series firewall help](https://service-provider.zyxel.com/compact-help/AX-DX-EX-PX-Series/AX-DX-EX-PX_5-70/h_Security_Firewall_DoS.html)
 documents ordered evaluation and GUI insertion, not a verified DAL insertion or
 reorder contract for a particular firmware. No ACL PUT/reorder is introduced.
-Documentation describes a 16-character UI name limit on some series; this
-provider uses longer generation names based on the existing DAL profile.
-Firmware that rejects or truncates them is unsupported: verification fails and
-retains recovery state. Check model/build compatibility before production use.
+Documentation describes a 16-character UI name limit on some series, so keep
+rule labels short; the provider adds only `-g` plus a four-character token to a
+named row. Firmware that rejects or truncates long names is unsupported:
+verification fails and retains recovery state. Check model/build compatibility
+before production use.
 
-## Recovering A Partial Apply
+## Manual Recovery For Conflicts
+
+For a verified partial policy ledger, review and apply Terraform's recovery
+plan; manual state editing is not required. Refresh itself never cleans up
+router rows. The following procedures are for conflicts that prevent verified
+reconciliation, or for individually managed ACL rules.
 
 These are **operator procedures**, not actions run automatically or during
 development. Stop all writers. Obtain an approved maintenance window, router
@@ -124,8 +148,9 @@ router exports/state private: they may contain credentials and network details.
    and all filters. Do not retry apply yet.
 2. Compare router inventory with `terraform state list` and `terraform state
    show`. Classify healthy tracked, tainted tracked, untracked and duplicate-name
-   rows. Include every policy `row_names` entry and all router rows in its
-   namespace. Missing ledger rows may be ambiguous writes that never committed.
+   rows. Include every policy `row_names` entry and all router rows carrying a
+   generation used by the ledger. Missing ledger rows may be ambiguous writes
+   that never committed.
 3. Operator-review the complete effective policy: every accept must precede
    every drop/reject, and prefix accepts must not bypass the drop rules. Resolve
    duplicate names through an explicitly approved manual change; the provider
@@ -139,9 +164,10 @@ router exports/state private: they may contain credentials and network details.
    Never import a row already owned by another address/state. Do not use `state
    rm` as a generic fix: it abandons ownership and can cause the next create to
    collide with a live row.
-6. A complete provider-named generation can be explicitly imported with
-   `terraform import zyxel_acl_policy.https 'NAME/GENERATION'`. Import accepts
-   only one complete, supported, contiguous generation. It does not adopt legacy
+6. A complete generation can be explicitly imported with
+   `terraform import zyxel_acl_policy.https 'GENERATION'`. The legacy
+   `NAME/GENERATION` form is still accepted but the name is ignored. Import
+   accepts only one complete, supported, contiguous generation. It does not adopt legacy
    arbitrary names, partial/mixed generations or damaged policies. Reconcile a
    partial ledger manually while preserving its complete row-name inventory and
    backup. Do not discard the ledger or clear taint to bypass diagnostics.
@@ -159,3 +185,19 @@ router exports/state private: they may contain credentials and network details.
 
 Development uses loopback fixtures only. It never deletes live router rules,
 removes deployment state, clears taint or runs live plan/apply.
+## Capacity-Limited Updates
+
+The AX7501-B0 V5.17 ACL table has an observed 32-row limit, including
+unrelated prefix rows. Updates first try to stage a complete new generation.
+If a create explicitly returns `ZCFG_INVALID_PARAM_VALUE` or
+`ZCFG_EXCEED_MAX_INS_NUM` at exactly 32 rows, the API verifies the transition,
+retires one old row, and retries that create.
+Old accepts retire before old drops/rejects. Staged rows are retained, and
+final row names remain a complete, importable generation.
+
+Early accept retirement can interrupt allowed traffic. If old drops must also
+retire to make space, protection is incomplete until the new drops are created.
+This window is not time-bounded: a subsequent failure requires operator
+recovery. Inspect the router and retained `row_names` ledger after any failure;
+do not blindly retry. Ambiguous writes never trigger capacity retries. Policies
+that cannot fit with the unrelated prefix do not trigger early retirement.

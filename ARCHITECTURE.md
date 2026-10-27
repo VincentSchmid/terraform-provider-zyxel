@@ -102,15 +102,33 @@ an explicit architecture decision, documentation update, and matching tests.
 
 `zyxel_acl_policy` owns a contiguous tail as two ordered lists: `rules`
 (accepts) and `drop_rules` (drops/rejects). The effective order is every accept,
-then every drop/reject; at least one drop/reject is required. Rules are validated
-independently, so they may use different protocols, services, address families,
-directions, destinations, ports, MAC filters and rate limits. It reuses verified
-single-row POST/DELETE, not an undocumented reorder API. Updates stage and verify
-a complete new generation behind the old tail, then retire old accepts before
-old drops/rejects. All steps run under the endpoint session lock; partial or
-ambiguous outcomes retain an exact ownership ledger and stop for operator
-reconciliation. Existing namespace rows require explicit import; prefix matches
-never confer ownership during create.
+then every drop/reject; at least one drop/reject is required. There is no policy
+name. Each rule may carry an optional label; named rows are
+`<rule-name>-g<2hex>` and unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex tokens,
+legacy 16-hex tokens and `ACL-<16hex>-<NN>` rows remain readable. Rules are validated independently,
+so they may use different protocols, services, address families, directions,
+destinations, ports, MAC filters and rate limits. It reuses verified single-row
+POST/DELETE, not an undocumented reorder API. Updates stage and verify a
+complete new generation behind the old tail, then retire old accepts before old
+drops/rejects. All steps run under the endpoint session lock; partial or
+ambiguous outcomes retain an exact ownership ledger. Ownership is exactly
+`row_names`; a name, prefix or generation token never confers it. Refresh
+inspects partial ledgers without writes; verified tracked tails schedule
+reconciliation on apply even with unchanged configuration. Recovery deletes
+exact tracked accepts before drops and rebuilds the desired generation, with a
+possible protection gap. Conflicting identities, unsupported rows, untracked
+rows carrying a tracked generation and unrelated interleaving require operator
+reconciliation. Existing generations require explicit import; changing a
+rule's name stages a new generation and retires the old rows.
+
+On V5.17, a `ZCFG_INVALID_PARAM_VALUE` or `ZCFG_EXCEED_MAX_INS_NUM` create
+rejection at exactly 32 rows permits capacity fallback after verifying the
+remaining old block and staged tail. Retire one old row (accepts before drops), then retry only the explicitly
+rejected create. Keep staged rows and their generation identities. Never do
+this for ambiguous writes, other result codes, or a desired tail that cannot
+fit alongside the unrelated prefix. Early accept retirement can interrupt
+access; early drop retirement leaves protection incomplete until staging ends.
+Failures preserve the exact ownership ledger for explicit recovery.
 
 This is a restricted tail reconciler, not an atomic transaction. Unrelated
 prefix rows must be accepts; operators must ensure these do not bypass the

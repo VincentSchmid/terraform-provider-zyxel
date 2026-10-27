@@ -1,1 +1,1 @@
-terraform import zyxel_acl_policy.https 'HTTPS-Sources/0123456789abcdef'
+terraform import zyxel_acl_policy.https '7f'

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -22,7 +23,6 @@ provider "zyxel" {
   password = "fixture-password"
 }
 resource "zyxel_acl_policy" "https" {
-  name = "policy-https"
   rules = [
     for cidr in %s : {
       action = "accept"
@@ -61,7 +61,6 @@ resource "zyxel_service" "https" {
   destination_ports = "443"
 }
 resource "zyxel_acl_policy" "service" {
-  name = "policy-service"
   rules = [
     for cidr in %s : {
       action = "accept"
@@ -97,20 +96,19 @@ func TestAccACLPolicy_serviceRules(t *testing.T) {
 			statecheck.ExpectKnownValue("zyxel_acl_policy.service", tfjsonpath.New("drop_rules").AtSliceIndex(0).AtMapKey("destination_ports"), knownvalue.Null()),
 		}},
 		{Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
-		{ResourceName: "zyxel_acl_policy.service", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "name", ImportStateIdFunc: func(*terraform.State) (string, error) {
+		{ResourceName: "zyxel_acl_policy.service", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "generation", ImportStateIdFunc: func(s *terraform.State) (string, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			for _, row := range f.rows {
 				name, ok := row["Name"].(string)
-				if !ok || !strings.HasPrefix(name, "policy-service-g") {
+				if !ok || name == "unmanaged" {
 					continue
 				}
 				if index := fixtureInt(row["X_ZYXEL_ServiceIndex"]); index != 101 {
 					return "", fmt.Errorf("policy row %q does not reference the service: %d", name, index)
 				}
-				return "policy-service/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-service-g"), "-01"), nil
 			}
-			return "", fmt.Errorf("no policy generation found")
+			return s.RootModule().Resources["zyxel_acl_policy.service"].Primary.Attributes["generation"], nil
 		}},
 	}})
 	if len(f.rows) != 1 || f.rows[0]["Name"] != "unmanaged" {
@@ -126,7 +124,6 @@ provider "zyxel" {
   password = "fixture-password"
 }
 resource "zyxel_acl_policy" "filters" {
-  name = "policy-filters"
   rules = [
     {
       action = "accept"
@@ -197,15 +194,8 @@ func TestAccACLPolicy_growthShrinkRefreshAndImport(t *testing.T) {
 			plancheck.ExpectResourceAction("zyxel_acl_policy.https", plancheck.ResourceActionUpdate),
 		}}},
 		{Config: grown, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
-		{ResourceName: "zyxel_acl_policy.https", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "name", ImportStateIdFunc: func(*terraform.State) (string, error) {
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			for _, row := range f.rows {
-				if name, ok := row["Name"].(string); ok && strings.HasPrefix(name, "policy-https-g") {
-					return "policy-https/" + strings.TrimSuffix(strings.TrimPrefix(name, "policy-https-g"), "-01"), nil
-				}
-			}
-			return "", fmt.Errorf("no policy generation found")
+		{ResourceName: "zyxel_acl_policy.https", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "generation", ImportStateIdFunc: func(s *terraform.State) (string, error) {
+			return s.RootModule().Resources["zyxel_acl_policy.https"].Primary.Attributes["generation"], nil
 		}},
 		{Config: empty},
 		{Config: empty, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
@@ -223,6 +213,8 @@ func TestAccACLPolicy_partialCreateRetainsAllRows(t *testing.T) {
 	f.failPostAt = 2
 	resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
 		{Config: policyTestConfig(f.server.URL, `["198.51.100.0/24"]`), ExpectError: regexp.MustCompile("500|ambiguous")},
+		{PreConfig: func() { f.mu.Lock(); defer f.mu.Unlock(); f.failPostAt = 0 }, Config: policyTestConfig(f.server.URL, `["198.51.100.0/24"]`)},
+		{Config: policyTestConfig(f.server.URL, `["198.51.100.0/24"]`), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 	}})
 	if len(f.rows) != 1 {
 		t.Fatal("partial policy create lost ownership of router rows")
@@ -238,8 +230,105 @@ func TestAccACLPolicy_partialUpdateRetainsBothGenerations(t *testing.T) {
 	resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
 		{Config: policyTestConfig(f.server.URL, `["198.51.100.0/24"]`)},
 		{PreConfig: func() { f.mu.Lock(); defer f.mu.Unlock(); f.failPostAt = f.posts + 1 }, Config: policyTestConfig(f.server.URL, `["192.0.2.0/24", "198.51.100.0/24"]`), ExpectError: regexp.MustCompile("500|ambiguous")},
+		// Returning to the original configuration must still schedule recovery:
+		// the failed update retained that configuration alongside both generations.
+		{PreConfig: func() { f.mu.Lock(); defer f.mu.Unlock(); f.failPostAt = 0 }, Config: policyTestConfig(f.server.URL, `["198.51.100.0/24"]`), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+			plancheck.ExpectResourceAction("zyxel_acl_policy.https", plancheck.ResourceActionUpdate),
+		}}},
+		{Config: policyTestConfig(f.server.URL, `["198.51.100.0/24"]`), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 	}})
 	if len(f.rows) != 1 {
 		t.Fatal("partial policy update lost ownership of router rows")
+	}
+}
+
+func TestAccACLPolicy_capacityUpdateConverges(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	for _, result := range []string{"ZCFG_INVALID_PARAM_VALUE", "ZCFG_EXCEED_MAX_INS_NUM"} {
+		t.Run(result, func(t *testing.T) {
+			f := newTerraformACLFixture(t)
+			f.compactOrders, f.maxACLRows, f.capacityResult = true, 32, result
+			initial := policyTestConfig(f.server.URL, `[for n in range(18) : "192.0.2.${n + 1}/32"]`)
+			shrunk := policyTestConfig(f.server.URL, `[for n in range(17) : "192.0.2.${n + 1}/32"]`)
+			resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
+				{Config: initial},
+				{Config: shrunk, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction("zyxel_acl_policy.https", plancheck.ResourceActionUpdate),
+				}}},
+				{Config: shrunk, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+			}})
+		})
+	}
+}
+
+func TestAccACLPolicy_namedRenameRefreshImport(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	f := newTerraformACLFixture(t)
+	config := policyTestConfig(f.server.URL, `["198.51.100.0/24"]`)
+	named := strings.Replace(config, `action = "accept"`, "name = \"WebDAV\"\n action = \"accept\"", 1)
+	named = strings.Replace(named, `action = "drop"`, "name = \"Deny\"\n action = \"drop\"", 1)
+	renamed := strings.Replace(named, "WebDAV", "WebDAV-New", 1)
+	check := func(label string) resource.TestCheckFunc {
+		return resource.ComposeTestCheckFunc(
+			resource.TestCheckResourceAttr("zyxel_acl_policy.https", "rules.0.name", label),
+			resource.TestCheckResourceAttr("zyxel_acl_policy.https", "drop_rules.0.name", "Deny"),
+			resource.TestMatchResourceAttr("zyxel_acl_policy.https", "generation", regexp.MustCompile(`^[0-9a-f]{2}$`)),
+			resource.TestMatchResourceAttr("zyxel_acl_policy.https", "row_names.0", regexp.MustCompile(`^`+label+`-g[0-9a-f]{2}$`)),
+		)
+	}
+	resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
+		{Config: named, Check: check("WebDAV")},
+		{Config: named, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+		{Config: renamed, Check: check("WebDAV-New")},
+		{Config: renamed, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+		{ResourceName: "zyxel_acl_policy.https", ImportState: true, ImportStateVerify: true, ImportStateVerifyIdentifierAttribute: "generation", ImportStateIdFunc: func(s *terraform.State) (string, error) {
+			return s.RootModule().Resources["zyxel_acl_policy.https"].Primary.Attributes["generation"], nil
+		}},
+		{Config: config, ConfigStateChecks: []statecheck.StateCheck{
+			statecheck.ExpectKnownValue("zyxel_acl_policy.https", tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("name"), knownvalue.Null()),
+			statecheck.ExpectKnownValue("zyxel_acl_policy.https", tfjsonpath.New("drop_rules").AtSliceIndex(0).AtMapKey("name"), knownvalue.Null()),
+		}},
+		{Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+	}})
+}
+
+func TestAccACLPolicy_legacyImport(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	for _, width := range []int{2, 3} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			f := newTerraformACLFixture(t)
+			c := aclFixtureClient(t, f)
+			p := fixtureACLPolicy("198.51.100.0/24")
+			out, err := c.ApplyACLPolicy(context.Background(), p, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const generation = "0123456789abcdef"
+			f.mu.Lock()
+			for i, name := range out.State.Names {
+				for _, row := range f.rows {
+					if row["Name"] == name {
+						row["Name"] = fmt.Sprintf("ACL-g%s-%0*d", generation, width, i+1)
+					}
+				}
+			}
+			f.mu.Unlock()
+			config := policyTestConfig(f.server.URL, `["198.51.100.0/24"]`)
+			resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: []resource.TestStep{
+				{Config: config, ResourceName: "zyxel_acl_policy.https", ImportState: true, ImportStateId: generation, ImportStatePersist: true},
+				{Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}, Check: resource.TestCheckResourceAttr("zyxel_acl_policy.https", "generation", generation), ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue("zyxel_acl_policy.https", tfjsonpath.New("rules").AtSliceIndex(0).AtMapKey("name"), knownvalue.Null()),
+				}},
+			}})
+			if len(f.rows) != 1 {
+				t.Fatal("legacy rows were not deleted")
+			}
+		})
 	}
 }
