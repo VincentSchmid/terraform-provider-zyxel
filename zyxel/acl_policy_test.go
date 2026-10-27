@@ -5,7 +5,7 @@ import "testing"
 func validTestPolicy() ACLPolicy {
 	a, d := testACLRule("accept", "accept", 0), testACLRule("drop", "drop", 0)
 	d.SourceCIDR = "0.0.0.0/0"
-	return ACLPolicy{Rules: []ACLRule{a, d}}
+	return ACLPolicy{ManagementRules: []ACLRule{testACLRule("management", "accept", 0)}, Rules: []ACLRule{a, d}}
 }
 
 // servicePolicyRules mirrors the ACL rule parameters the provider adapter sends
@@ -51,6 +51,7 @@ func TestACLPolicyServiceRulesArePerRule(t *testing.T) {
 				p.Rules[i].Service = "https"
 			}
 		}
+		p.ManagementRules = validTestPolicy().ManagementRules
 		if err := p.Validate(); err != nil {
 			t.Fatalf("%s: rejected supported policy: %v", name, err)
 		}
@@ -108,6 +109,7 @@ func TestACLPolicyValidation(t *testing.T) {
 			return []ACLRule{first, second}
 		}()},
 	} {
+		p.ManagementRules = validTestPolicy().ManagementRules
 		if err := p.Validate(); err != nil {
 			t.Fatalf("rejected supported policy: %v", err)
 		}

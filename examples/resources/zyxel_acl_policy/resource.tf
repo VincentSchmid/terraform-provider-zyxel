@@ -1,9 +1,25 @@
+# WARNING: ACL updates are non-atomic. Deny rules are temporarily removed,
+# potentially allowing normally blocked traffic. Management rule changes may also
+# interrupt router access. Use a maintenance window and ensure a recovery path is
+# available.
+# Choose ONE policy example per router; each resource owns the entire ACL tail.
+
 variable "https_source_ranges" {
   type    = set(string)
   default = ["198.51.100.0/24", "192.0.2.0/24"]
 }
 
 locals {
+  management_rules = [{
+    name              = "Management"
+    action            = "accept"
+    protocol          = "tcp"
+    ip_version        = "ipv4"
+    direction         = "lan_to_router"
+    source_cidr       = "192.168.1.0/24"
+    destination_cidr  = "192.168.1.1/32"
+    destination_ports = "443"
+  }]
   https_filter = {
     protocol          = "tcp"
     ip_version        = "ipv4"
@@ -13,10 +29,12 @@ locals {
   }
 }
 
-# Accepts are evaluated in list order, then every drop rule. At least one drop
+# Management rules precede normal accepts, then every drop rule. At least one drop
 # rule is required. Review unrelated prefix accepts for overlap before creating
 # this tail policy. Do not manage generated rows individually.
 resource "zyxel_acl_policy" "https" {
+  management_rules = local.management_rules
+
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
       action      = "accept"
@@ -50,6 +68,8 @@ locals {
 }
 
 resource "zyxel_acl_policy" "https_service" {
+  management_rules = local.management_rules
+
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
       action      = "accept"
@@ -64,8 +84,10 @@ resource "zyxel_acl_policy" "https_service" {
 }
 
 # Mixed-scope accepts are allowed; one or more drops follow them. The effective
-# order is the accept list, then the drop list.
+# order is management, then normal accepts, then drops.
 resource "zyxel_acl_policy" "mixed" {
+  management_rules = local.management_rules
+
   rules = [
     {
       name              = "WebDAV"

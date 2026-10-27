@@ -20,11 +20,20 @@ migration, production writes or retrying a partial apply.
 
 ## Import
 
-Only complete generations support explicit import; arbitrary ACL rows and
-partial generations cannot be adopted as a policy. Import by bare generation,
-for example `terraform import zyxel_acl_policy.https '7f'`. The legacy
-`name/generation` form is still accepted but the name is ignored. Current
-two-hex, earlier four-hex and legacy 16-hex generation tokens are accepted.
-Import restores optional logical rule names; unnamed rows retain null names.
+Import a complete tail with explicit management membership and exact names:
+`terraform import zyxel_acl_policy.https '7f:1:Management-gab,g7f-02,g7f-03'`.
+The format is `generation:management_count:row_name,row_name,...`, with names in
+router evaluation order. The first `management_count` rows must be accepts.
+This supports preserved management identities from earlier generations. Import
+does not write router rows or guess management roles. Copy the exact inventory
+from trusted state/router readback; never import rows owned elsewhere.
+
+Bare-generation imports (for example `7f`) and legacy `name/generation` imports
+remain supported for complete old single-generation policies. They preserve all
+accepts in `rules` and leave `management_rules` empty, just like upgraded legacy
+state. Add the required management configuration before the next apply. Current
+two-hex, earlier four-hex and legacy 16-hex tokens are accepted. Partial,
+unsupported or interleaved policies cannot be adopted. Logical labels are
+restored and unnamed rows retain null names.
 
 {{codefile "shell" .ImportFile}}

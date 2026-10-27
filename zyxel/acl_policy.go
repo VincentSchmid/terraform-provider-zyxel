@@ -13,12 +13,16 @@ import (
 	"strings"
 )
 
-// ACLPolicy owns a contiguous tail of the ACL table. Rules is the effective
-// evaluation order: zero or more accepts followed by one or more drops/rejects.
-// Rules may use different scopes. Names in Rules are optional logical labels;
-// the API creates generation-qualified names.
+// ACLPolicy owns a contiguous tail: management accepts, normal accepts, then
+// drops/rejects. Names are optional logical labels, not router identities.
 type ACLPolicy struct {
+	ManagementRules []ACLRule
+	// Rules contains normal accepts followed by at least one drop/reject.
 	Rules []ACLRule
+}
+
+func (p ACLPolicy) allRules() []ACLRule {
+	return append(append([]ACLRule(nil), p.ManagementRules...), p.Rules...)
 }
 
 // ACLPolicyState is the recoverable ownership ledger, not a prefix-adoption hint.
@@ -29,6 +33,11 @@ type ACLPolicyState struct {
 	Generation string
 	Names      []string
 	Rules      []ACLRule
+	// ManagementNames records exact management identities, including replacements
+	// that coexist during a partial update. Pending forces reconciliation even
+	// when the remaining rows happen to form a valid policy.
+	ManagementNames []string
+	Pending         bool
 	// LogicalNames contains optional configured labels, derived from exact router names.
 	LogicalNames []string
 }
@@ -40,7 +49,7 @@ type ACLPolicyOutcome struct {
 
 // ACLPolicyRecovery is a read-only inspection of an exact ownership ledger.
 // State retains every tracked name, including absent or ambiguous writes.
-// Pending means apply must clean up the tracked tail before creating a new one.
+// Pending means apply must reconcile the tail while protecting management rules.
 type ACLPolicyRecovery struct {
 	State   ACLPolicyState
 	Pending bool
@@ -204,7 +213,7 @@ func inspectACLPolicyRecovery(rows []map[string]any, state ACLPolicyState) (ACLP
 			result.Missing = append(result.Missing, name)
 		}
 	}
-	if _, err := inspectACLPolicyTable(rows, &state); err == nil {
+	if _, err := inspectACLPolicyTable(rows, &state); err == nil && !state.Pending {
 		observed, err := observeACLPolicy(rows, state)
 		if err != nil {
 			return result, nil, err
@@ -219,13 +228,23 @@ func inspectACLPolicyRecovery(rows []map[string]any, state ACLPolicyState) (ACLP
 // tail always ends in explicit protection. Each rule is validated on its own;
 // rules may have different scopes.
 func (p ACLPolicy) Validate() error {
-	if len(p.Rules) < 1 || len(p.Rules) > 999 {
-		return errors.New("ACL policy requires 1-999 rules, including at least one drop or reject")
+	return p.validate(true)
+}
+
+func (p ACLPolicy) validate(requireManagement bool) error {
+	if requireManagement && len(p.ManagementRules) == 0 {
+		return errors.New("ACL policy requires at least one management rule")
+	}
+	if len(p.allRules()) < 1 || len(p.allRules()) > 32 {
+		return errors.New("ACL policy requires 1-32 total rules, including at least one drop or reject")
 	}
 	seen := map[string]bool{}
 	dropped := false
 	drops := 0
-	for i, r := range p.Rules {
+	for i, r := range p.allRules() {
+		if i < len(p.ManagementRules) && r.Action != "accept" {
+			return errors.New("ACL policy management rules must use accept")
+		}
 		if r.Name != "" {
 			if seen[r.Name] || !aclPolicyLogicalName.MatchString(r.Name) {
 				return errors.New("ACL policy logical rule names must be unique and contain only ASCII letters, digits, underscores or hyphens")
@@ -316,19 +335,13 @@ func unusedPolicyGeneration(rows []map[string]any, previous *ACLPolicyState, gen
 	return "", errors.New("could not allocate an unused ACL policy generation after 32 attempts")
 }
 
-// ApplyACLPolicy stages a complete new tail behind the old drop, verifies it,
-// then removes the old accepts and finally its drops/rejects. At the observed
-// 32-row capacity, explicit rejections trigger incremental early retirement,
-// potentially removing old drops before the new protection is complete. It never uses
-// PUT/reorder. Any rule may change, including its traffic scope. Partial
-// failures retain an exact ownership ledger. Retrying a partial ledger cleans
-// up its tracked rows (accepts before drops), then builds the desired tail;
-// protection can be absent during this explicitly non-atomic recovery.
+// ApplyACLPolicy is non-atomic: deny rules are removed before rebuilding the
+// tail. Management replacements are verified before retiring old management.
+// Every possible write is retained in the exact ownership ledger on failure.
 func (c *Client) ApplyACLPolicy(ctx context.Context, desired ACLPolicy, previous *ACLPolicyState) (ACLPolicyOutcome, error) {
 	var out ACLPolicyOutcome
 	if previous != nil {
 		out.State = *previous
-		out.State.Names = append([]string(nil), previous.Names...)
 	}
 	if err := desired.Validate(); err != nil {
 		return out, err
@@ -338,134 +351,206 @@ func (c *Client) ApplyACLPolicy(ctx context.Context, desired ACLPolicy, previous
 		if err != nil {
 			return err
 		}
+		var prefix []map[string]any
+		var present []ACLRule
+		if previous != nil {
+			recovery, unrelated, err := inspectACLPolicyRecovery(rows, *previous)
+			if err != nil {
+				return err
+			}
+			prefix, present = unrelated, recovery.Present
+		} else {
+			prefix, err = inspectACLPolicyTable(rows, nil)
+			if err != nil {
+				return err
+			}
+		}
+		management := map[string]bool{}
+		if previous != nil {
+			for _, name := range previous.ManagementNames {
+				if management[name] {
+					return errors.New("duplicate ACL policy management identity")
+				}
+				management[name] = true
+			}
+			for name := range management {
+				found := false
+				for _, tracked := range previous.Names {
+					found = found || tracked == name
+				}
+				if !found {
+					return errors.New("ACL policy management identity is outside ownership ledger")
+				}
+			}
+		}
+		var oldManagement, normal, deny []ACLRule
+		for _, rule := range present {
+			if management[rule.Name] {
+				if rule.Action != "accept" {
+					return errors.New("tracked management rule is not an accept")
+				}
+				oldManagement = append(oldManagement, rule)
+			} else if rule.Action == "accept" {
+				normal = append(normal, rule)
+			} else {
+				deny = append(deny, rule)
+			}
+		}
+		// A failed apply may already have appended a verified prefix of the new
+		// management set. Reuse that suffix rather than consuming another set of
+		// slots or deleting the remaining old management prematurely.
+		retained := 0
+		for count := min(len(oldManagement), len(desired.ManagementRules)); count > 0; count-- {
+			if previous != nil && !previous.Pending && (count != len(oldManagement) || count != len(desired.ManagementRules)) {
+				continue
+			}
+			matches := true
+			for i, old := range oldManagement[len(oldManagement)-count:] {
+				_, old.Name, _, _, _ = parseACLPolicyRowName(old.Name)
+				if !sameACLPolicyConfiguration(old, desired.ManagementRules[i]) {
+					matches = false
+					break
+				}
+			}
+			if matches {
+				retained = count
+				break
+			}
+		}
+		unchanged := retained == len(oldManagement) && retained == len(desired.ManagementRules)
+		if len(rows) > 32 || len(prefix)+len(desired.allRules()) > 32 {
+			return errors.New("ACL policy exceeds the 32-rule router capacity, including unmanaged rules")
+		}
+		if !unchanged && len(prefix)+len(oldManagement)+len(desired.ManagementRules)-retained > 32 {
+			return errors.New("ACL policy management replacement exceeds the transitional 32-rule capacity")
+		}
+		// Resolve every service before removing any existing protection.
+		for _, rule := range desired.allRules() {
+			if _, err := s.resolveACLServiceIndex(ctx, rule.Service, rule.ServiceID); err != nil {
+				return err
+			}
+		}
 		generation, err := unusedPolicyGeneration(rows, previous, policyGeneration)
 		if err != nil {
 			return err
 		}
-		// A failed staging/capacity retirement retains old rules and all attempted
-		// names. Recover only those exact rows, never a name-discovered row.
-		if previous != nil {
-			recovery, prefix, inspectErr := inspectACLPolicyRecovery(rows, *previous)
-			if inspectErr != nil {
-				return inspectErr
-			}
-			if recovery.Pending {
-				var accepts, drops []string
-				for _, rule := range recovery.Present {
-					if rule.Action == "accept" {
-						accepts = append(accepts, rule.Name)
-					} else {
-						drops = append(drops, rule.Name)
-					}
-				}
-				for _, name := range append(accepts, drops...) {
-					current, readErr := s.readACLRows(ctx)
-					if readErr != nil {
-						return readErr
-					}
-					_, currentPrefix, inspectErr := inspectACLPolicyRecovery(current, *previous)
-					if inspectErr != nil {
-						return inspectErr
-					}
-					if !reflect.DeepEqual(prefix, currentPrefix) {
-						return errors.New("unrelated ACL prefix changed during recovery")
-					}
-					out.Changed = true
-					if err := s.deleteACLRule(ctx, name); err != nil {
-						return fmt.Errorf("ACL policy recovery cleanup failed; retain ledger: %w", err)
-					}
-				}
-				rows, err = s.readACLRows(ctx)
-				if err != nil {
-					return err
-				}
-				_, currentPrefix, inspectErr := inspectACLPolicyRecovery(rows, *previous)
-				if inspectErr != nil {
-					return inspectErr
-				}
-				if !reflect.DeepEqual(prefix, currentPrefix) {
-					return errors.New("unrelated ACL prefix changed during recovery")
-				}
-				previous = nil
+		ledger := ACLPolicyState{Generation: generation, Pending: true}
+		// Absent names have now been reconciled by a successful table read.
+		for _, rule := range present {
+			ledger.Names = append(ledger.Names, rule.Name)
+			ledger.Rules = append(ledger.Rules, rule)
+			if management[rule.Name] {
+				ledger.ManagementNames = append(ledger.ManagementNames, rule.Name)
 			}
 		}
-		prefix, err := inspectACLPolicyTable(rows, previous)
-		if err != nil {
-			return err
-		}
-		staged := ACLPolicyState{Generation: generation}
-		if previous == nil && len(out.State.Names) == 0 {
-			out.State = staged
-		}
-		retired := 0
-		for i, logical := range desired.Rules {
-			rule := logical
-			rule.Name = aclPolicyRowName(generation, i, logical.Name)
-			rule.OrderMode = ACLOrderAppend
-			if err := rule.expandPorts(); err != nil {
+		check := func() error {
+			current, err := s.readACLRows(ctx)
+			if err != nil {
 				return err
 			}
-			created, err := s.createACLRule(ctx, rule, true)
-			for err != nil && previous != nil && retired < len(previous.Names) && !created.Applied && !created.Ambiguous {
-				var rejected *ACLWriteRejectedError
-				if !errors.As(err, &rejected) || (rejected.Result != "ZCFG_INVALID_PARAM_VALUE" && rejected.Result != "ZCFG_EXCEED_MAX_INS_NUM") {
-					break
-				}
-				// AX7501-B0 V5.17 rejects the 33rd row with either code; the
-				// first is otherwise generic. Never infer capacity from the
-				// code alone.
-				current, readErr := s.readACLRows(ctx)
-				if readErr != nil {
-					return readErr
-				}
-				if len(current) != 32 || len(prefix)+len(desired.Rules) > 32 {
-					break
-				}
-				if verifyErr := s.verifyACLPolicyTransition(ctx, prefix, previous, retired, staged); verifyErr != nil {
-					return verifyErr
-				}
-				// Retire only as much as needed, accepts before drops. If
-				// drops must go, protection is incomplete until staging ends.
-				if deleteErr := s.deleteACLRule(ctx, previous.Names[retired]); deleteErr != nil {
-					return fmt.Errorf("ACL policy capacity retirement failed; reconcile retained state: %w", deleteErr)
-				}
-				out.Changed = true
-				retired++
-				created, err = s.createACLRule(ctx, rule, true)
-			}
-			if created.Applied || created.Ambiguous {
-				out.Changed = true
-				out.State.Names = append(out.State.Names, rule.Name)
-			}
+			recovery, unrelated, err := inspectACLPolicyRecovery(current, ledger)
 			if err != nil {
-				return fmt.Errorf("ACL policy staging failed; retain state and reconcile before retrying: %w", err)
+				return err
 			}
-			staged.Names = append(staged.Names, rule.Name)
-			staged.Rules = append(staged.Rules, *created.Rule)
+			if len(recovery.Missing) != 0 {
+				return errors.New("ACL policy row disappeared during update; retain ledger")
+			}
+			if !reflect.DeepEqual(prefix, unrelated) {
+				return errors.New("unrelated ACL prefix changed during policy update")
+			}
+			return nil
 		}
-		// Do not retire any old protection until the entire staged block,
-		// including its final drop, has been read back and verified.
-		if err := s.verifyACLPolicyTransition(ctx, prefix, previous, retired, staged); err != nil {
-			return err
-		}
-		if previous != nil {
-			for _, name := range previous.Names[retired:] {
-				if err := s.verifyStagedACLPolicy(ctx, prefix, previous, staged); err != nil {
+		remove := func(rules []ACLRule) error {
+			for _, rule := range rules {
+				if err := check(); err != nil {
 					return err
 				}
-				if err := s.deleteACLRule(ctx, name); err != nil {
-					return fmt.Errorf("ACL policy retirement failed; retain both generations for recovery: %w", err)
-				}
 				out.Changed = true
+				out.State = ledger
+				if err := s.deleteACLRule(ctx, rule.Name); err != nil {
+					return fmt.Errorf("ACL policy deletion failed; retain ledger: %w", err)
+				}
+				for i, name := range ledger.Names {
+					if name == rule.Name {
+						ledger.Names = append(ledger.Names[:i:i], ledger.Names[i+1:]...)
+						ledger.Rules = append(ledger.Rules[:i:i], ledger.Rules[i+1:]...)
+						break
+					}
+				}
+				for i, name := range ledger.ManagementNames {
+					if name == rule.Name {
+						ledger.ManagementNames = append(ledger.ManagementNames[:i:i], ledger.ManagementNames[i+1:]...)
+						break
+					}
+				}
+				out.State = ledger
 			}
+			return nil
+		}
+		create := func(rules []ACLRule, offset int, isManagement bool) error {
+			for i, logical := range rules {
+				if err := check(); err != nil {
+					return err
+				}
+				rule := logical
+				rule.Name = aclPolicyRowName(generation, offset+i, logical.Name)
+				rule.OrderMode = ACLOrderAppend
+				if err := rule.expandPorts(); err != nil {
+					return err
+				}
+				created, err := s.createACLRule(ctx, rule, true)
+				if created.Applied || created.Ambiguous {
+					out.Changed = true
+					ledger.Names = append(ledger.Names, rule.Name)
+					rule.OrderMode = ""
+					if rule.ServiceID != "" {
+						rule.Service = ""
+					}
+					if created.Rule != nil {
+						rule.Order = created.Rule.Order
+					}
+					ledger.Rules = append(ledger.Rules, rule)
+					if isManagement {
+						ledger.ManagementNames = append(ledger.ManagementNames, rule.Name)
+					}
+					out.State = ledger
+				}
+				if err != nil {
+					return fmt.Errorf("ACL policy creation failed; retain ledger: %w", err)
+				}
+			}
+			return nil
+		}
+		if err := remove(deny); err != nil {
+			return err
+		}
+		if err := remove(normal); err != nil {
+			return err
+		}
+		if !unchanged {
+			if err := create(desired.ManagementRules[retained:], retained, true); err != nil {
+				return err
+			}
+			// Verify the complete replacement set before deleting old management.
+			if err := check(); err != nil {
+				return err
+			}
+			if err := remove(oldManagement[:len(oldManagement)-retained]); err != nil {
+				return err
+			}
+		}
+		if err := create(desired.Rules, len(desired.ManagementRules), false); err != nil {
+			return err
+		}
+		if err := check(); err != nil {
+			return err
 		}
 		rows, err = s.readACLRows(ctx)
 		if err != nil {
 			return err
 		}
-		// Deletions can compact positions; compare every field except numeric
-		// order and then record the final observations for the whole block.
-		observed, err := observeACLPolicy(rows, staged)
+		ledger.Pending = false
+		observed, err := observeACLPolicy(rows, ledger)
 		if err != nil {
 			return err
 		}
@@ -478,90 +563,16 @@ func (c *Client) ApplyACLPolicy(ctx context.Context, desired ACLPolicy, previous
 	return out, err
 }
 
-// Verify the exact remaining old block as well as the staged tail before
-// capacity retirement. A partial old generation cannot use observeACLPolicy's
-// complete-generation identity check.
-func (s *routerSession) verifyACLPolicyTransition(ctx context.Context, prefix []map[string]any, previous *ACLPolicyState, retired int, staged ACLPolicyState) error {
-	if err := s.verifyStagedACLPolicy(ctx, prefix, previous, staged); err != nil {
-		return err
+func sameACLPolicyConfiguration(a, b ACLRule) bool {
+	a.Order, b.Order, a.OrderMode, b.OrderMode = 0, 0, "", ""
+	if a.expandPorts() != nil || b.expandPorts() != nil {
+		return false
 	}
-	rows, err := s.readACLRows(ctx)
-	if err != nil {
-		return err
+	if b.ServiceID != "" {
+		a.Service = ""
+		b.Service = ""
 	}
-	remaining := 0
-	if previous != nil {
-		remaining = len(previous.Names) - retired
-	}
-	if len(rows) != len(prefix)+remaining+len(staged.Names) {
-		return errors.New("ACL table changed during capacity retirement; reconcile retained state")
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		a, _ := aclInt64(rows[i]["Order"])
-		b, _ := aclInt64(rows[j]["Order"])
-		return a < b
-	})
-	for i := 0; i < remaining; i++ {
-		got, err := parseACLRule(rows[len(prefix)+i])
-		if err != nil {
-			return err
-		}
-		want := previous.Rules[retired+i]
-		want.Order = got.Order
-		if got.Name != previous.Names[retired+i] || len(aclRuleDifferences(want, got)) != 0 {
-			return errors.New("old ACL policy changed during capacity retirement; reconcile retained state")
-		}
-	}
-	return nil
-}
-
-func (s *routerSession) verifyStagedACLPolicy(ctx context.Context, prefix []map[string]any, previous *ACLPolicyState, staged ACLPolicyState) error {
-	rows, err := s.readACLRows(ctx)
-	if err != nil {
-		return err
-	}
-	if _, err := observeACLPolicy(rows, staged); err != nil {
-		return err
-	}
-	ordered := append([]map[string]any(nil), rows...)
-	sort.Slice(ordered, func(i, j int) bool {
-		a, _ := aclInt64(ordered[i]["Order"])
-		b, _ := aclInt64(ordered[j]["Order"])
-		return a < b
-	})
-	seenOrders := map[int64]bool{}
-	for i, row := range ordered {
-		order, ok := aclInt64(row["Order"])
-		if !ok || order < 1 || seenOrders[order] {
-			return errors.New("invalid or duplicate ACL orders while staging")
-		}
-		seenOrders[order] = true
-		if i >= len(ordered)-len(staged.Names) && row["Name"] != staged.Names[i-(len(ordered)-len(staged.Names))] {
-			return errors.New("staged ACL policy is not the contiguous tail; refusing further writes")
-		}
-	}
-	// previous supplies only the managed-name set here. Its content is verified
-	// separately because capacity retirement may already have removed some of it.
-	owned := map[string]bool{}
-	for _, name := range staged.Names {
-		owned[name] = true
-	}
-	if previous != nil {
-		for _, name := range previous.Names {
-			owned[name] = true
-		}
-	}
-	currentPrefix := []map[string]any{}
-	for _, row := range ordered {
-		name, _ := row["Name"].(string)
-		if !owned[name] {
-			currentPrefix = append(currentPrefix, aclPolicyComparableRow(row))
-		}
-	}
-	if !reflect.DeepEqual(prefix, currentPrefix) {
-		return errors.New("unrelated ACL prefix changed while staging policy; refusing further writes")
-	}
-	return nil
+	return len(aclRuleDifferences(b, a)) == 0
 }
 
 func aclPolicyComparableRow(row map[string]any) map[string]any {
@@ -585,17 +596,36 @@ func inspectACLPolicyTable(rows []map[string]any, previous *ACLPolicyState) ([]m
 		if len(previous.Names) == 0 || len(previous.Names) != len(previous.Rules) {
 			return nil, errors.New("incomplete ACL policy ledger; operator recovery required")
 		}
-		policy := ACLPolicy{Rules: append([]ACLRule(nil), previous.Rules...)}
-		for i := range policy.Rules {
-			policy.Rules[i].Order = 0
-			generation, label, _, _, valid := parseACLPolicyRowName(policy.Rules[i].Name)
+		policy := ACLPolicy{}
+		management := map[string]bool{}
+		for _, name := range previous.ManagementNames {
+			if management[name] {
+				return nil, errors.New("duplicate ACL policy management identity")
+			}
+			management[name] = true
+		}
+		for i, rule := range previous.Rules {
+			rule.Order = 0
+			generation, label, _, _, valid := parseACLPolicyRowName(rule.Name)
 			if !valid {
 				return nil, errors.New("invalid ACL policy ownership ledger")
 			}
 			generations[generation] = true
-			policy.Rules[i].Name = label
+			if management[rule.Name] {
+				if i != len(policy.ManagementRules) {
+					return nil, errors.New("ACL policy management rules must precede normal rules")
+				}
+				rule.Name = label
+				policy.ManagementRules = append(policy.ManagementRules, rule)
+			} else {
+				rule.Name = label
+				policy.Rules = append(policy.Rules, rule)
+			}
 		}
-		if err := policy.Validate(); err != nil {
+		if len(policy.ManagementRules) != len(management) {
+			return nil, errors.New("ACL policy management identity is outside ownership ledger")
+		}
+		if err := policy.validate(false); err != nil {
 			return nil, fmt.Errorf("invalid ACL policy ledger: %w", err)
 		}
 		if _, err := observeACLPolicy(rows, *previous); err != nil {
@@ -646,12 +676,12 @@ func observeACLPolicy(rows []map[string]any, state ACLPolicyState) (ACLPolicySta
 	var lastOrder int64
 	for i, name := range state.Names {
 		generation, label, position, format, valid := parseACLPolicyRowName(name)
-		if i >= len(state.Rules) || !valid || generation != state.Generation {
+		if i >= len(state.Rules) || !valid || (len(state.ManagementNames) == 0 && generation != state.Generation) {
 			return state, errors.New("ACL policy has an incomplete ownership ledger; operator recovery required")
 		}
 		// Named rows carry no position. Legacy and unnamed rows must preserve
 		// their positional suffix, which also catches missing rows.
-		if format != aclPolicyRowNamed && position != i+1 {
+		if len(state.ManagementNames) == 0 && format != aclPolicyRowNamed && position != i+1 {
 			return state, errors.New("ACL policy has an incomplete ownership ledger; operator recovery required")
 		}
 		row, err := findACLRow(rows, name)
@@ -696,13 +726,29 @@ func (c *Client) ReadACLPolicy(ctx context.Context, state ACLPolicyState) (ACLPo
 	return observed, err
 }
 
-// ImportACLPolicy explicitly adopts a single complete generation by token, in
-// table order. It rejects mixed/partial generations. Named rows have no
+// ImportACLPolicy adopts a complete tail using generation:management_count:names
+// (comma-separated exact names in evaluation order). Bare generation tokens
+// retain legacy single-generation import without inferring management roles.
+// Named rows have no
 // positional suffix, so a generation missing only its final drop is rejected by
 // policy validation, while an incomplete generation that still contains a drop
 // cannot be distinguished from a complete one. The generation must form the
 // contiguous managed tail.
 func (c *Client) ImportACLPolicy(ctx context.Context, generation string) (ACLPolicyState, error) {
+	var names []string
+	managementCount := 0
+	if parts := strings.Split(generation, ":"); len(parts) == 3 {
+		var err error
+		managementCount, err = strconv.Atoi(parts[1])
+		if err != nil || managementCount < 1 {
+			return ACLPolicyState{}, errors.New("invalid management rule count in ACL policy import")
+		}
+		names = strings.Split(parts[2], ",")
+		generation = parts[0]
+		if managementCount >= len(names) {
+			return ACLPolicyState{}, errors.New("ACL policy import requires management rules and a deny rule")
+		}
+	}
 	state := ACLPolicyState{Generation: generation}
 	if !validPolicyGeneration(generation) {
 		return state, errors.New("ACL policy generation must be 2, 4 or 16 lowercase hexadecimal characters")
@@ -720,7 +766,14 @@ func (c *Client) ImportACLPolicy(ctx context.Context, generation string) (ACLPol
 		for _, row := range rows {
 			n, _ := row["Name"].(string)
 			g, label, _, _, valid := parseACLPolicyRowName(n)
-			if !valid || g != generation {
+			selected := valid && g == generation
+			if names != nil {
+				selected = false
+				for _, name := range names {
+					selected = selected || n == name
+				}
+			}
+			if !selected {
 				continue
 			}
 			rule, err := parseACLRule(row)
@@ -731,13 +784,21 @@ func (c *Client) ImportACLPolicy(ctx context.Context, generation string) (ACLPol
 			state.Rules = append(state.Rules, rule)
 			state.LogicalNames = append(state.LogicalNames, label)
 		}
+		if names != nil {
+			if !reflect.DeepEqual(names, state.Names) {
+				return errors.New("ACL policy import identities are missing, duplicated or out of order")
+			}
+			state.ManagementNames = append([]string(nil), names[:managementCount]...)
+			_, err := inspectACLPolicyTable(rows, &state)
+			return err
+		}
 
 		policy := ACLPolicy{Rules: append([]ACLRule(nil), state.Rules...)}
 		for i := range policy.Rules {
 			policy.Rules[i].Order = 0
 			policy.Rules[i].Name = state.LogicalNames[i]
 		}
-		if err := policy.Validate(); err != nil {
+		if err := policy.validate(false); err != nil {
 			return err
 		}
 		_, err = inspectACLPolicyTable(rows, &state)
