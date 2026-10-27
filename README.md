@@ -402,6 +402,11 @@ Remove the override when you want to use the published provider again.
 See [PUBLISHING.md](PUBLISHING.md) for the release workflow, signing key setup,
 and how new versions reach the Terraform Registry.
 
+## Acknowledgments
+
+Thanks to [millaguie/zyxel-cli](https://github.com/millaguie/zyxel-cli) for the
+reference implementation used to port the Zyxel router API integration to Go.
+
 ## License
 
 [Mozilla Public License 2.0](LICENSE).
