@@ -15,7 +15,7 @@ import (
 )
 
 func fixtureACLPolicy(sources ...string) zyxel.ACLPolicy {
-	p := zyxel.ACLPolicy{}
+	p := zyxel.ACLPolicy{ManagementRules: []zyxel.ACLRule{testACLRule("Management", "accept", 0)}}
 	for i, source := range append(sources, "0.0.0.0/0") {
 		r := testACLRule("", "accept", 0)
 		r.SourceCIDR = source
@@ -48,8 +48,9 @@ func TestACLPolicyModelPassesServiceRuleParameters(t *testing.T) {
 		}
 	}
 	model := aclPolicyModel{
-		Rules:     []aclPolicyRuleModel{rule("accept", "198.51.100.0/24")},
-		DropRules: []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")},
+		ManagementRules: []aclPolicyRuleModel{testManagementModel()},
+		Rules:           []aclPolicyRuleModel{rule("accept", "198.51.100.0/24")},
+		DropRules:       []aclPolicyRuleModel{rule("drop", "0.0.0.0/0")},
 	}
 	p, known := modelACLPolicy(model)
 	if !known {
@@ -90,8 +91,9 @@ func TestACLPolicyModelDefaultsProtocolForBothServiceForms(t *testing.T) {
 	inline.DestinationPorts = types.StringValue("1194")
 
 	model := aclPolicyModel{
-		Rules:     []aclPolicyRuleModel{byName, byID},
-		DropRules: []aclPolicyRuleModel{inline},
+		ManagementRules: []aclPolicyRuleModel{testManagementModel()},
+		Rules:           []aclPolicyRuleModel{byName, byID},
+		DropRules:       []aclPolicyRuleModel{inline},
 	}
 	p, known := modelACLPolicy(model)
 	if !known {
@@ -124,8 +126,9 @@ func TestACLPolicyModelKeepsAcceptsBeforeDrops(t *testing.T) {
 	drop := base("drop")
 	drop.PacketsPerUnit, drop.RateLimitUnit = types.Int64Null(), types.StringNull()
 	model := aclPolicyModel{
-		Rules:     []aclPolicyRuleModel{accept},
-		DropRules: []aclPolicyRuleModel{drop},
+		ManagementRules: []aclPolicyRuleModel{testManagementModel()},
+		Rules:           []aclPolicyRuleModel{accept},
+		DropRules:       []aclPolicyRuleModel{drop},
 	}
 	p, known := modelACLPolicy(model)
 	if !known {
@@ -189,7 +192,8 @@ func TestACLPolicyValidateConfigAcceptsSeparateRuleLists(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			model := aclPolicyModel{
-				Rules: test.rules, DropRules: test.dropRules,
+				ManagementRules: []aclPolicyRuleModel{testManagementModel()},
+				Rules:           test.rules, DropRules: test.dropRules,
 				Generation: types.StringNull(), RowNames: types.ListNull(types.StringType), ObservedOrders: types.ListNull(types.Int64Type),
 			}
 			plan := tfsdk.Plan{Schema: schemaResp.Schema}
@@ -214,10 +218,10 @@ func TestACLPolicyCreatesServiceRulesThroughACLRulePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.State.Rules) != 2 {
+	if len(out.State.Rules) != 3 {
 		t.Fatalf("unexpected ledger: %#v", out.State)
 	}
-	for _, rule := range out.State.Rules {
+	for _, rule := range out.State.Rules[1:] {
 		if rule.ServiceID != "7" || rule.Protocol != "all" || rule.DestinationPortStart != nil {
 			t.Fatalf("service filters not preserved through the ACL rule path: %#v", rule)
 		}
@@ -234,7 +238,7 @@ func TestACLPolicyCreatesServiceRulesThroughACLRulePath(t *testing.T) {
 	if changed.State.Generation == grown.State.Generation {
 		t.Fatal("service change did not stage a new generation")
 	}
-	if _, err := c.ImportACLPolicy(ctx, changed.State.Generation); err != nil {
+	if _, err := c.ImportACLPolicy(ctx, policyImportID(changed.State)); err != nil {
 		t.Fatalf("import of a service-backed policy: %v", err)
 	}
 	if err := c.DeleteACLPolicy(ctx, changed.State); err != nil {
@@ -258,7 +262,7 @@ func TestACLPolicyReadsLegacyThreeDigitGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(initial.State.Names) != 2 || !strings.HasSuffix(initial.State.Names[0], "-01") || !strings.HasSuffix(initial.State.Names[1], "-02") {
+	if len(initial.State.Names) != 3 || !strings.HasSuffix(initial.State.Names[1], "-02") || !strings.HasSuffix(initial.State.Names[2], "-03") {
 		t.Fatalf("new generation did not use two-digit suffixes: %v", initial.State.Names)
 	}
 
@@ -266,6 +270,7 @@ func TestACLPolicyReadsLegacyThreeDigitGeneration(t *testing.T) {
 	legacy := initial.State
 	legacy.Names = nil
 	legacy.Generation = "0123456789abcdef"
+	legacy.ManagementNames = nil
 	for i, name := range initial.State.Names {
 		legacyName := fmt.Sprintf("ACL-g%s-%03d", legacy.Generation, i+1)
 		for _, row := range f.rows {
@@ -290,259 +295,13 @@ func TestACLPolicyReadsLegacyThreeDigitGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update from a three-digit generation: %v", err)
 	}
-	for i, name := range out.State.Names {
-		if !strings.HasSuffix(name, fmt.Sprintf("-%02d", i+1)) {
+	for i, name := range out.State.Names[1:] {
+		if !strings.HasSuffix(name, fmt.Sprintf("-%02d", i+2)) {
 			t.Fatalf("replacement generation did not use two-digit suffixes: %v", out.State.Names)
 		}
 	}
 	if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestACLPolicyStagesGrowthBehindExistingDrop(t *testing.T) {
-	f := newTerraformACLFixture(t)
-	f.rows[0]["Order"] = 40
-	f.compactOrders, f.rejectOccupiedOrder = true, true
-	c := aclFixtureClient(t, f)
-	ctx := context.Background()
-	first, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !first.Changed || len(first.State.Names) != 2 || !strings.HasSuffix(first.State.Names[0], "-01") || first.State.Rules[0].Order != 2 {
-		t.Fatalf("unexpected state: %#v", first)
-	}
-	beforeUpdate := len(f.history)
-	second, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("192.0.2.0/24", "198.51.100.0/24"), &first.State)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.State.Generation == first.State.Generation || len(second.State.Names) != 3 {
-		t.Fatalf("generation not replaced: %#v", second)
-	}
-	for _, snapshot := range f.history[beforeUpdate:] {
-		var drops int
-		for _, row := range snapshot {
-			if row["Target"] == "Drop" {
-				drops++
-			}
-		}
-		if drops == 0 {
-			t.Fatal("policy update removed terminal protection")
-		}
-		if snapshot[0]["Name"] != "unmanaged" {
-			t.Fatal("unrelated prefix mutated")
-		}
-	}
-	// All new rows precede their drop; compaction is recorded, not rejected.
-	for i, rule := range second.State.Rules {
-		if rule.Order != int64(i+2) {
-			t.Fatalf("bad observed order: %#v", rule)
-		}
-	}
-	refreshed, err := c.ReadACLPolicy(ctx, second.State)
-	if err != nil || len(refreshed.Names) != 3 {
-		t.Fatalf("refresh: %#v %v", refreshed, err)
-	}
-	imported, err := c.ImportACLPolicy(ctx, second.State.Generation)
-	if err != nil || len(imported.Names) != 3 {
-		t.Fatalf("explicit import: %#v %v", imported, err)
-	}
-	third, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("192.0.2.0/24"), &second.State)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.DeleteACLPolicy(ctx, third.State); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.rows) != 1 || f.rows[0]["Name"] != "unmanaged" {
-		t.Fatal("destroy changed unrelated rules")
-	}
-}
-
-func TestACLPolicyNamedMigrationAtCapacity(t *testing.T) {
-	f := newTerraformACLFixture(t)
-	f.compactOrders, f.rejectOccupiedOrder, f.maxACLRows = true, true, 32
-	c := aclFixtureClient(t, f)
-	ctx := context.Background()
-	sources := make([]string, 18)
-	for i := range sources {
-		sources[i] = fmt.Sprintf("192.0.2.%d/32", i+1)
-	}
-	initial, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy(sources...), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Replace every unnamed row with a named rule, as a live legacy migration would.
-	named := fixtureACLPolicy(sources...)
-	for i := range named.Rules {
-		named.Rules[i].Name = fmt.Sprintf("Rule_%d", i+1)
-	}
-	out, err := c.ApplyACLPolicy(ctx, named, &initial.State)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, name := range out.State.Names {
-		if want := fmt.Sprintf("Rule_%d-g%s", i+1, out.State.Generation); name != want {
-			t.Fatalf("row %d is %q, want %q", i, name, want)
-		}
-	}
-	refreshed, err := c.ReadACLPolicy(ctx, out.State)
-	if err != nil || len(refreshed.Names) != len(out.State.Names) {
-		t.Fatalf("refresh: %#v %v", refreshed, err)
-	}
-	if len(f.rows) != 20 { // 19 policy rows plus the unrelated prefix row.
-		t.Fatalf("retired rows were not removed: %d rows", len(f.rows))
-	}
-}
-
-func TestACLPolicyCapacityFallback(t *testing.T) {
-	for _, result := range []string{"ZCFG_INVALID_PARAM_VALUE", "ZCFG_EXCEED_MAX_INS_NUM"} {
-		for _, count := range []int{17, 18, 30, 31} {
-			t.Run(fmt.Sprint(result, "/", count), func(t *testing.T) {
-				testACLPolicyCapacityFallback(t, result, count)
-			})
-		}
-	}
-}
-
-func testACLPolicyCapacityFallback(t *testing.T, result string, count int) {
-	t.Helper()
-	f := newTerraformACLFixture(t)
-	f.compactOrders, f.rejectOccupiedOrder, f.maxACLRows, f.capacityResult = true, true, 32, result
-	c := aclFixtureClient(t, f)
-	ctx := context.Background()
-	sources := make([]string, 18)
-	for i := range sources {
-		sources[i] = fmt.Sprintf("192.0.2.%d/32", i+1)
-	}
-	initial, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy(sources...), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := len(f.history)
-	sources = make([]string, count)
-	for i := range sources {
-		sources[i] = fmt.Sprintf("198.51.100.%d/32", i+1)
-	}
-	out, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy(sources...), &initial.State)
-	if count == 31 { // The unrelated prefix also consumes a slot.
-		if err == nil || !strings.Contains(err.Error(), result) || f.deletes != 0 {
-			t.Fatalf("oversized policy retired protection: %v, deletes=%d", err, f.deletes)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	window := false
-	for _, snapshot := range f.history[before:] {
-		drops := 0
-		for _, row := range snapshot {
-			if row["Target"] == "Drop" {
-				drops++
-			}
-		}
-		window = window || drops == 0
-		if len(snapshot) > 32 || snapshot[0]["Name"] != "unmanaged" {
-			t.Fatal("capacity or prefix changed")
-		}
-	}
-	if window != (count == 30) {
-		t.Fatalf("unexpected protection window: %v", window)
-	}
-	if _, err := c.ReadACLPolicy(ctx, out.State); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.ImportACLPolicy(ctx, out.State.Generation); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestACLPolicyCapacityFailureLedger(t *testing.T) {
-	for _, failure := range []string{"delete", "ambiguous-retry", "below-capacity"} {
-		t.Run(failure, func(t *testing.T) {
-			f := newTerraformACLFixture(t)
-			f.compactOrders, f.maxACLRows = true, 32
-			c := aclFixtureClient(t, f)
-			ctx := context.Background()
-			sources := make([]string, 18)
-			for i := range sources {
-				sources[i] = fmt.Sprintf("192.0.2.%d/32", i+1)
-			}
-			initial, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy(sources...), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch failure {
-			case "delete":
-				f.failDeleteAt = 1
-			case "ambiguous-retry":
-				f.failPostAt = f.posts + 13 // Twelve creates fill the table.
-			case "below-capacity":
-				f.maxACLRows = 24
-			}
-			out, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy(sources[:17]...), &initial.State)
-			if err == nil || !out.Changed {
-				t.Fatalf("expected recoverable failure: %#v %v", out, err)
-			}
-			if failure == "below-capacity" && f.deletes != 0 {
-				t.Fatal("generic rejection triggered retirement below known capacity")
-			}
-			tracked := map[string]bool{}
-			for _, name := range out.State.Names {
-				tracked[name] = true
-			}
-			for _, row := range f.rows {
-				name := row["Name"].(string)
-				if name != "unmanaged" && !tracked[name] {
-					t.Fatalf("untracked write: %s", name)
-				}
-			}
-			f.failDeleteAt, f.failPostAt = 0, 0
-			if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestACLPolicyFailuresPreserveOwnershipAndOldDrop(t *testing.T) {
-	for _, stage := range []string{"ambiguous-first", "ambiguous-drop", "readback", "security", "retirement"} {
-		t.Run(stage, func(t *testing.T) {
-			f := newTerraformACLFixture(t)
-			f.compactOrders = true
-			c := aclFixtureClient(t, f)
-			ctx := context.Background()
-			initial, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24"), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch stage {
-			case "ambiguous-first":
-				f.failPostAt = f.posts + 1
-			case "ambiguous-drop":
-				f.failPostAt = f.posts + 3
-			case "readback":
-				f.failReadback = true
-			case "security":
-				f.mutateCreate = func(row map[string]any) { row["SourceIP"] = "203.0.113.0" }
-			case "retirement":
-				f.failDeleteAt = 1
-			}
-			out, err := c.ApplyACLPolicy(ctx, fixtureACLPolicy("198.51.100.0/24", "192.0.2.0/24"), &initial.State)
-			if err == nil || !out.Changed || len(out.State.Names) <= len(initial.State.Names) {
-				t.Fatalf("lost partial ledger: %#v %v", out, err)
-			}
-			if err := f.check(initial.State.Names[len(initial.State.Names)-1], true); err != nil {
-				t.Fatal("old drop lost:", err)
-			}
-			f.failDeleteAt = 0
-			if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
-				t.Fatal("could not clean exact tracked rows:", err)
-			}
-		})
 	}
 }
 
@@ -589,7 +348,7 @@ func TestACLPolicyPreflightRejectsCollisionsDriftAndMissingRows(t *testing.T) {
 	f := newTerraformACLFixture(t)
 	f.rows = append(f.rows, fixtureACLRow("Other-g7f3d", 2, 2))
 	out, err := aclFixtureClient(t, f).ApplyACLPolicy(context.Background(), fixtureACLPolicy("192.0.2.0/24"), nil)
-	if err != nil || len(out.State.Names) != 2 || out.State.Generation == "7f3d" {
+	if err != nil || len(out.State.Names) != 3 || out.State.Generation == "7f3d" {
 		t.Fatalf("create did not treat the unrelated row as an unowned prefix: %#v %v", out, err)
 	}
 	for _, name := range out.State.Names {
@@ -609,9 +368,9 @@ func TestACLPolicyNamedAndUnnamedRowFormats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(created.State.Names) != 2 ||
-		created.State.Names[0] != "Web-DAV_2-g"+created.State.Generation ||
-		created.State.Names[1] != "Deny-g"+created.State.Generation {
+	if len(created.State.Names) != 3 ||
+		created.State.Names[1] != "Web-DAV_2-g"+created.State.Generation ||
+		created.State.Names[2] != "Deny-g"+created.State.Generation {
 		t.Fatalf("named rows: %v (generation %s)", created.State.Names, created.State.Generation)
 	}
 	unnamed := fixtureACLPolicy("192.0.2.0/24", "198.51.100.0/24")
@@ -619,16 +378,17 @@ func TestACLPolicyNamedAndUnnamedRowFormats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.State.Names) != 3 ||
-		out.State.Names[0] != "g"+out.State.Generation+"-01" ||
-		out.State.Names[2] != "g"+out.State.Generation+"-03" {
+	if len(out.State.Names) != 4 ||
+		out.State.Names[0] != created.State.Names[0] ||
+		out.State.Names[1] != "g"+out.State.Generation+"-02" ||
+		out.State.Names[3] != "g"+out.State.Generation+"-04" {
 		t.Fatalf("unnamed rows: %v (generation %s)", out.State.Names, out.State.Generation)
 	}
 	if _, err := c.ReadACLPolicy(ctx, out.State); err != nil {
 		t.Fatal(err)
 	}
-	imported, err := c.ImportACLPolicy(ctx, out.State.Generation)
-	if err != nil || len(imported.Names) != 3 || imported.Names[0] != out.State.Names[0] {
+	imported, err := c.ImportACLPolicy(ctx, policyImportID(out.State))
+	if err != nil || len(imported.Names) != 4 || imported.Names[0] != out.State.Names[0] {
 		t.Fatalf("import by bare generation: %#v %v", imported, err)
 	}
 	if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
@@ -700,4 +460,16 @@ func TestACLPolicyStateUpgradeDropsNameAndRefreshesLegacyRows(t *testing.T) {
 	if len(refreshed.Names) != 1 || refreshed.Names[0] != "ACL-g0123456789abcdef-01" {
 		t.Fatalf("refreshed ledger: %#v", refreshed.Names)
 	}
+}
+
+func testManagementModel() aclPolicyRuleModel {
+	return aclPolicyRuleModel{
+		Name: types.StringValue("Management"), Action: types.StringValue("accept"), Protocol: types.StringValue("tcp"),
+		IPVersion: types.StringValue("ipv4"), Direction: types.StringValue("lan_to_router"),
+		SourceCIDR: types.StringValue("192.168.1.0/24"), DestinationCIDR: types.StringValue("192.168.1.1/32"), DestinationPorts: types.StringValue("443"),
+	}
+}
+
+func policyImportID(state zyxel.ACLPolicyState) string {
+	return fmt.Sprintf("%s:%d:%s", state.Generation, len(state.ManagementNames), strings.Join(state.Names, ","))
 }

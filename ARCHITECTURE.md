@@ -13,7 +13,7 @@ zyxel/
     dhcp.go                     DHCP types, validation, identity, operations
     nat.go                      NAT types, validation, conflicts, operations
     acl.go                      ACL types, validation, profile, operations
-    acl_policy.go               ordered ACL tail ownership and staged reconciliation
+    acl_policy.go               ordered ACL tail ownership and management-safe reconciliation
     service.go                  reusable protocol services and compact port syntax
     firewall.go                 router-wide General and DoS settings
     lan.go                      per-group IPv4 LAN/DHCP settings
@@ -49,6 +49,9 @@ tests -> internal/routertest
    observations into state, and errors into diagnostics. Do not select rows,
    resolve indexes, send requests, decode responses, or implement encryption.
    It may configure an HTTP client for the feed; fetching belongs in `cloudflare`.
+   `acl_policy_state.go` alone may use JSON to persist the typed recovery ledger
+   in Terraform private state; it must not decode router wire responses. The
+   architecture test enforces this narrow state-serialization exception.
 3. Validate API inputs independently of Terraform. Early Terraform checks may
    repeat constraints for attribute diagnostics. Unknown/null handling and
    replacement decisions belong only to Terraform.
@@ -100,44 +103,49 @@ an explicit architecture decision, documentation update, and matching tests.
 
 ### Ordered ACL Policy Decision
 
-`zyxel_acl_policy` owns a contiguous tail as two ordered lists: `rules`
-(accepts) and `drop_rules` (drops/rejects). The effective order is every accept,
-then every drop/reject; at least one drop/reject is required. There is no policy
-name. Each rule may carry an optional label; named rows are
-`<rule-name>-g<2hex>` and unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex tokens,
-legacy 16-hex tokens and `ACL-<16hex>-<NN>` rows remain readable. Rules are validated independently,
-so they may use different protocols, services, address families, directions,
-destinations, ports, MAC filters and rate limits. It reuses verified single-row
-POST/DELETE, not an undocumented reorder API. Updates stage and verify a
-complete new generation behind the old tail, then retire old accepts before old
-drops/rejects. All steps run under the endpoint session lock; partial or
-ambiguous outcomes retain an exact ownership ledger. Ownership is exactly
-`row_names`; a name, prefix or generation token never confers it. Refresh
-inspects partial ledgers without writes; verified tracked tails schedule
-reconciliation on apply even with unchanged configuration. Recovery deletes
-exact tracked accepts before drops and rebuilds the desired generation, with a
-possible protection gap. Conflicting identities, unsupported rows, untracked
-rows carrying a tracked generation and unrelated interleaving require operator
-reconciliation. Existing generations require explicit import; changing a
-rule's name stages a new generation and retires the old rows.
+`zyxel_acl_policy` owns a contiguous tail ordered as `management_rules`
+(required accepts), `rules` (normal accepts), then `drop_rules` (required
+drops/rejects). Logical names are optional and unique across all lists. Named
+rows are `<rule-name>-g<2hex>`; unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex
+and legacy 16-hex formats remain readable. Ownership is exactly `row_names`;
+matching names, prefixes or generation tokens never confer ownership.
 
-On V5.17, a `ZCFG_INVALID_PARAM_VALUE` or `ZCFG_EXCEED_MAX_INS_NUM` create
-rejection at exactly 32 rows permits capacity fallback after verifying the
-remaining old block and staged tail. Retire one old row (accepts before drops), then retry only the explicitly
-rejected create. Keep staged rows and their generation identities. Never do
-this for ambiguous writes, other result codes, or a desired tail that cannot
-fit alongside the unrelated prefix. Early accept retirement can interrupt
-access; early drop retirement leaves protection incomplete until staging ends.
-Failures preserve the exact ownership ledger for explicit recovery.
+Configuration, service references, the exact tracked tail and capacity are
+validated before mutations. The 32-row limit includes the unmanaged prefix.
+Updates delete old denies, then normal accepts. Unchanged management rules are
+compared by configuration, not generated identity or observed order, and are
+left untouched. Changed management rules are appended and verified as a complete
+replacement set before old management is deleted. Normal accepts and denies are
+then appended, and final ordering and all supported fields are verified. The
+capacity preflight includes temporary coexistence of old and new management;
+there is no rejection-triggered capacity fallback or ambiguous-write retry.
 
-This is a restricted tail reconciler, not an atomic transaction. Unrelated
-prefix rows must be accepts; operators must ensure these do not bypass the
-policy drops. A staged accept outside the old terminal drop's scope can take
-effect before verification, so a catch-all terminal drop is recommended when
-that matters. Temporary loss of access, overlap of old and new scopes, and
-delayed revocation are possible while old rules retire. Out-of-process writers
-remain unsupported during operations. Destroy deliberately removes policy
-protection, deleting every non-accept last.
+All steps run under the endpoint session lock and reuse verified single-row
+POST/DELETE, never undocumented PUT/reorder. Partial outcomes preserve exact
+identities, expected configurations, management membership and a pending marker
+in the API ledger and Terraform private state. Refresh inspects without writes;
+pending reconciliation schedules apply even if configuration is unchanged.
+Retries remove tracked denies and normal accepts, reuse verified replacement
+management prefixes when possible, and never retire old management before
+verifying the full replacement. Conflicting identities, unsupported/security-
+drifted rows, untracked rows sharing a tracked generation and unrelated
+interleaving require operator reconciliation. Destroy removes tracked accepts
+before denies and deliberately removes protection.
+
+Schema versions 0 and 1 upgrade without router writes, preserving existing
+lists and identities with no inferred management membership. Configuration must
+supply management rules for the next apply. Bare-generation and legacy
+`name/generation` imports remain supported for old single-generation policies;
+explicit `generation:management_count:row_name,row_name,...` import records a
+complete mixed-generation tail and management membership without guessing.
+
+**Warning:** ACL updates are non-atomic. Deny rules are temporarily removed,
+potentially allowing normally blocked traffic. Management rule changes may also
+interrupt router access. Use a maintenance window and ensure a recovery path is
+available.
+
+Unrelated prefix rules must be accepts; operators must ensure they do not bypass
+the policy denies. Out-of-process writers remain unsupported during operations.
 
 ## Development Pattern
 

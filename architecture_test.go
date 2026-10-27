@@ -59,7 +59,9 @@ func TestProviderDependencyBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.HasPrefix(importPath, "crypto/") || importPath == "encoding/json" || importPath == "net/http/cookiejar" || importPath == modulePath+"/internal/routertest" {
+			// This file serializes a typed private-state ledger, not router JSON.
+			stateJSON := importPath == "encoding/json" && name == "internal/provider/acl_policy_state.go"
+			if strings.HasPrefix(importPath, "crypto/") || (importPath == "encoding/json" && !stateJSON) || importPath == "net/http/cookiejar" || importPath == modulePath+"/internal/routertest" {
 				t.Errorf("%s imports %s: wire protocol and fixtures do not belong in the Terraform adapter", name, importPath)
 			}
 			if importPath == "net/http" {

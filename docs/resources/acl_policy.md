@@ -3,22 +3,44 @@
 page_title: "zyxel_acl_policy Resource - zyxel"
 subcategory: ""
 description: |-
-  Manages the ordered ACL tail for a router. rules holds accepts; drop_rules holds the drops/rejects applied after every accept. The effective order is every rules entry in list order, then every drop_rules entry in list order. At least one drop/reject is required. There is no policy name; each rule may carry an optional name. Named rows are <rule-name>-g<2hex>; unnamed rows are g<2hex>-<NN>. Earlier 4-hex and legacy 16-hex tokens and ACL-<16hex>-<NN> rows remain readable. Ownership comes only from the exact row_names ledger, never from a name prefix. Changing a rule's name stages a new generation and retires the old rows. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. At the observed 32-row limit, an explicit capacity rejection can retire old rows early (accepts before drops) to finish staging. Early drop retirement leaves protection incomplete until the new drops are created; a failure can extend this window until recovery. Refresh preserves verified partial ownership without router writes; the next apply reconciles tracked rows and rebuilds the policy, even with unchanged configuration. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
+  Manages the ordered ACL tail: management_rules, then rules, then drop_rules. Management rules are required accepts; unchanged management identities are preserved. Updates delete old denies, delete normal rules, create and verify replacement management rules if needed, retire old management, then create normal rules and denies. The 32-rule router limit includes unmanaged rows and temporary management coexistence. Ownership is the exact row_names ledger, never a name prefix. No PUT/reorder is used. Unrelated prefix rules must be accepts; do not manage policy rows with other resources. See the ACL ordering and recovery guide.
+  Warning: ACL updates are non-atomic. Deny rules are temporarily removed, potentially allowing normally blocked traffic. Management rule changes may also interrupt router access. Use a maintenance window and ensure a recovery path is available.
 ---
 
 # zyxel_acl_policy (Resource)
 
-Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. There is no policy name; each rule may carry an optional `name`. Named rows are `<rule-name>-g<2hex>`; unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex and legacy 16-hex tokens and `ACL-<16hex>-<NN>` rows remain readable. Ownership comes only from the exact `row_names` ledger, never from a name prefix. Changing a rule's `name` stages a new generation and retires the old rows. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. At the observed 32-row limit, an explicit capacity rejection can retire old rows early (accepts before drops) to finish staging. Early drop retirement leaves protection incomplete until the new drops are created; a failure can extend this window until recovery. Refresh preserves verified partial ownership without router writes; the next apply reconciles tracked rows and rebuilds the policy, even with unchanged configuration. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.
+Manages the ordered ACL tail: `management_rules`, then `rules`, then `drop_rules`. Management rules are required accepts; unchanged management identities are preserved. Updates delete old denies, delete normal rules, create and verify replacement management rules if needed, retire old management, then create normal rules and denies. The 32-rule router limit includes unmanaged rows and temporary management coexistence. Ownership is the exact `row_names` ledger, never a name prefix. No PUT/reorder is used. Unrelated prefix rules must be accepts; do not manage policy rows with other resources. See the ACL ordering and recovery guide.
+
+**Warning:** ACL updates are non-atomic. Deny rules are temporarily removed, potentially allowing normally blocked traffic. Management rule changes may also interrupt router access. Use a maintenance window and ensure a recovery path is available.
+
+Read the [ordering and recovery guide](../guides/acl-ordering-recovery.md) before
+migration, production writes or retrying a partial apply.
 
 ## Example Usage
 
 ```terraform
+# WARNING: ACL updates are non-atomic. Deny rules are temporarily removed,
+# potentially allowing normally blocked traffic. Management rule changes may also
+# interrupt router access. Use a maintenance window and ensure a recovery path is
+# available.
+# Choose ONE policy example per router; each resource owns the entire ACL tail.
+
 variable "https_source_ranges" {
   type    = set(string)
   default = ["198.51.100.0/24", "192.0.2.0/24"]
 }
 
 locals {
+  management_rules = [{
+    name              = "Management"
+    action            = "accept"
+    protocol          = "tcp"
+    ip_version        = "ipv4"
+    direction         = "lan_to_router"
+    source_cidr       = "192.168.1.0/24"
+    destination_cidr  = "192.168.1.1/32"
+    destination_ports = "443"
+  }]
   https_filter = {
     protocol          = "tcp"
     ip_version        = "ipv4"
@@ -28,10 +50,12 @@ locals {
   }
 }
 
-# Accepts are evaluated in list order, then every drop rule. At least one drop
+# Management rules precede normal accepts, then every drop rule. At least one drop
 # rule is required. Review unrelated prefix accepts for overlap before creating
 # this tail policy. Do not manage generated rows individually.
 resource "zyxel_acl_policy" "https" {
+  management_rules = local.management_rules
+
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
       action      = "accept"
@@ -65,6 +89,8 @@ locals {
 }
 
 resource "zyxel_acl_policy" "https_service" {
+  management_rules = local.management_rules
+
   rules = [
     for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
       action      = "accept"
@@ -79,8 +105,10 @@ resource "zyxel_acl_policy" "https_service" {
 }
 
 # Mixed-scope accepts are allowed; one or more drops follow them. The effective
-# order is the accept list, then the drop list.
+# order is management, then normal accepts, then drops.
 resource "zyxel_acl_policy" "mixed" {
+  management_rules = local.management_rules
+
   rules = [
     {
       name              = "WebDAV"
@@ -124,6 +152,7 @@ resource "zyxel_acl_policy" "mixed" {
 ### Required
 
 - `drop_rules` (Attributes List) Ordered drop/reject rules, evaluated after every accept. Each entry must have `action = "drop"` or `"reject"`; at least one entry is required so a policy cannot silently omit its deny coverage. Rules may have different scopes. (see [below for nested schema](#nestedatt--drop_rules))
+- `management_rules` (Attributes List) Ordered management access rules. At least one accept is required. Unchanged rules retain their router identities; replacements are verified before old management rules are deleted. (see [below for nested schema](#nestedatt--management_rules))
 
 ### Optional
 
@@ -140,7 +169,7 @@ resource "zyxel_acl_policy" "mixed" {
 
 Required:
 
-- `action` (String) `accept` in `rules`; `drop` or `reject` in `drop_rules`.
+- `action` (String) `accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.
 - `destination_cidr` (String) Canonical destination network in the selected address family.
 - `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
 - `ip_version` (String) ipv4 or ipv6.
@@ -150,7 +179,7 @@ Optional:
 
 - `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
 - `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
-- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across both lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
+- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across all three lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
 - `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
 - `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
 - `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
@@ -159,12 +188,13 @@ Optional:
 - `source_ports` (String) Source ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
 - `tcp_flag` (String) Optional TCP flag to match. Only valid with the `tcp` and `tcp_udp` protocols.
 
-<a id="nestedatt--rules"></a>
-### Nested Schema for `rules`
+
+<a id="nestedatt--management_rules"></a>
+### Nested Schema for `management_rules`
 
 Required:
 
-- `action` (String) `accept` in `rules`; `drop` or `reject` in `drop_rules`.
+- `action` (String) `accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.
 - `destination_cidr` (String) Canonical destination network in the selected address family.
 - `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
 - `ip_version` (String) ipv4 or ipv6.
@@ -174,7 +204,32 @@ Optional:
 
 - `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
 - `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
-- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across both lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
+- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across all three lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
+- `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
+- `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
+- `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
+- `service` (String) Name of an existing custom protocol/service group. Mutually exclusive with `service_id` and inline protocol/port/TCP-flag filters.
+- `service_id` (String) Native custom service ID, for example `zyxel_service.https.id`. Mutually exclusive with `service` and inline protocol/port/TCP-flag filters. The router rows are created through the same ACL rule write path.
+- `source_ports` (String) Source ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
+- `tcp_flag` (String) Optional TCP flag to match. Only valid with the `tcp` and `tcp_udp` protocols.
+
+
+<a id="nestedatt--rules"></a>
+### Nested Schema for `rules`
+
+Required:
+
+- `action` (String) `accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.
+- `destination_cidr` (String) Canonical destination network in the selected address family.
+- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
+- `ip_version` (String) ipv4 or ipv6.
+- `source_cidr` (String) Canonical source network in the selected address family.
+
+Optional:
+
+- `destination_ports` (String) Destination ports: `*` (any), `443` (single), or `443-445` (inclusive range). Conflicts with `service`/`service_id`. TCP/UDP protocols only.
+- `mac_address` (String) Optional canonical uppercase source MAC filter. Omit for any MAC.
+- `name` (String) Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across all three lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows.
 - `packets_per_unit` (Number) Optional packet rate limit from 1 through 512 per `rate_limit_unit`. Requires `action = "accept"`.
 - `protocol` (String) Inline protocol: all, tcp_udp, tcp, udp, icmp or icmpv6. Required unless `service` or `service_id` is set; the neutral `all` value is computed for both service forms because the referenced service selects the protocol.
 - `rate_limit_unit` (String) Time period for `packets_per_unit`: `minute` or `second`. Defaults to `minute`; only used when `packets_per_unit` is set.
@@ -185,10 +240,23 @@ Optional:
 
 ## Import
 
-Import is supported using the following syntax:
+Import a complete tail with explicit management membership and exact names:
+`terraform import zyxel_acl_policy.https '7f:1:Management-gab,g7f-02,g7f-03'`.
+The format is `generation:management_count:row_name,row_name,...`, with names in
+router evaluation order. The first `management_count` rows must be accepts.
+This supports preserved management identities from earlier generations. Import
+does not write router rows or guess management roles. Copy the exact inventory
+from trusted state/router readback; never import rows owned elsewhere.
 
-The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+Bare-generation imports (for example `7f`) and legacy `name/generation` imports
+remain supported for complete old single-generation policies. They preserve all
+accepts in `rules` and leave `management_rules` empty, just like upgraded legacy
+state. Add the required management configuration before the next apply. Current
+two-hex, earlier four-hex and legacy 16-hex tokens are accepted. Partial,
+unsupported or interleaved policies cannot be adopted. Logical labels are
+restored and unnamed rows retain null names.
 
 ```shell
-terraform import zyxel_acl_policy.https '7f'
+# Replace with the exact complete tail and management count from your router.
+terraform import zyxel_acl_policy.https '7f:1:Management-gab,g7f-02,g7f-03'
 ```

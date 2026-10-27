@@ -50,6 +50,8 @@ type terraformACLFixture struct {
 	failReadback        bool
 	failNextRead        bool
 	failPostAfterCommit bool
+	aclReads            int
+	failACLReadAt       int
 }
 
 type terraformACLSession struct {
@@ -132,6 +134,13 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if r.Method == http.MethodGet {
+			if oid == "firewall_acl" {
+				f.aclReads++
+				if f.failACLReadAt != 0 && f.aclReads == f.failACLReadAt {
+					http.Error(w, "fixture final read failure", http.StatusServiceUnavailable)
+					return
+				}
+			}
 			if f.brokenReads || f.failNextRead {
 				f.failNextRead = false
 				http.Error(w, "fixture read failure", http.StatusServiceUnavailable)
@@ -228,7 +237,7 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 			f.requestedOrders = append(f.requestedOrders, fixtureInt(body["Order"]))
 			if f.maxACLRows > 0 && len(f.rows) >= f.maxACLRows {
 				// Both codes were observed from V5.17 hardware at the 32-row
-				// limit; the capacity fallback must handle either.
+				// limit; policy preflight must avoid either rejection.
 				result := f.capacityResult
 				if result == "" {
 					result = "ZCFG_INVALID_PARAM_VALUE"

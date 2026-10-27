@@ -45,11 +45,12 @@ func (r *ACLPolicyResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 }
 
 type aclPolicyModel struct {
-	Rules          []aclPolicyRuleModel `tfsdk:"rules"`
-	DropRules      []aclPolicyRuleModel `tfsdk:"drop_rules"`
-	Generation     types.String         `tfsdk:"generation"`
-	RowNames       types.List           `tfsdk:"row_names"`
-	ObservedOrders types.List           `tfsdk:"observed_orders"`
+	ManagementRules []aclPolicyRuleModel `tfsdk:"management_rules"`
+	Rules           []aclPolicyRuleModel `tfsdk:"rules"`
+	DropRules       []aclPolicyRuleModel `tfsdk:"drop_rules"`
+	Generation      types.String         `tfsdk:"generation"`
+	RowNames        types.List           `tfsdk:"row_names"`
+	ObservedOrders  types.List           `tfsdk:"observed_orders"`
 }
 
 type aclPolicyRuleModel struct {
@@ -76,9 +77,14 @@ func (*ACLPolicyResource) Metadata(_ context.Context, req resource.MetadataReque
 
 func (*ACLPolicyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Version:             1,
-		MarkdownDescription: "Manages the ordered ACL tail for a router. `rules` holds accepts; `drop_rules` holds the drops/rejects applied after every accept. The effective order is every `rules` entry in list order, then every `drop_rules` entry in list order. At least one drop/reject is required. There is no policy name; each rule may carry an optional `name`. Named rows are `<rule-name>-g<2hex>`; unnamed rows are `g<2hex>-<NN>`. Earlier 4-hex and legacy 16-hex tokens and `ACL-<16hex>-<NN>` rows remain readable. Ownership comes only from the exact `row_names` ledger, never from a name prefix. Changing a rule's `name` stages a new generation and retires the old rows. Updates stage and verify a new generation behind the old drop, then remove old accepts and finally old drops/rejects. At the observed 32-row limit, an explicit capacity rejection can retire old rows early (accepts before drops) to finish staging. Early drop retirement leaves protection incomplete until the new drops are created; a failure can extend this window until recovery. Refresh preserves verified partial ownership without router writes; the next apply reconciles tracked rows and rebuilds the policy, even with unchanged configuration. This is not atomic: traffic may be interrupted and old accepts may remain effective until retired. No PUT/reorder is used. Unrelated prefix rules must be accepts, reviewed by the operator for overlap. Do not manage its rows with other resources. See the ACL ordering and recovery guide before production use; hardware writes remain unverified.",
+		Version:             2,
+		MarkdownDescription: "Manages the ordered ACL tail: `management_rules`, then `rules`, then `drop_rules`. Management rules are required accepts; unchanged management identities are preserved. Updates delete old denies, delete normal rules, create and verify replacement management rules if needed, retire old management, then create normal rules and denies. The 32-rule router limit includes unmanaged rows and temporary management coexistence. Ownership is the exact `row_names` ledger, never a name prefix. No PUT/reorder is used. Unrelated prefix rules must be accepts; do not manage policy rows with other resources. See the ACL ordering and recovery guide.\n\n**Warning:** ACL updates are non-atomic. Deny rules are temporarily removed, potentially allowing normally blocked traffic. Management rule changes may also interrupt router access. Use a maintenance window and ensure a recovery path is available.",
 		Attributes: map[string]schema.Attribute{
+			"management_rules": schema.ListNestedAttribute{
+				Required: true, MarkdownDescription: "Ordered management access rules. At least one accept is required. Unchanged rules retain their router identities; replacements are verified before old management rules are deleted.",
+				NestedObject: aclPolicyRuleObject(),
+				Validators:   []validator.List{aclPolicyManagementValidator{}},
+			},
 			"rules": schema.ListNestedAttribute{
 				Optional: true, MarkdownDescription: "Ordered accept rules, evaluated before every entry in `drop_rules`. Each entry must have `action = \"accept\"`. Rules may have different protocols, services, address families, directions, destinations and ports. No numeric order is configured.",
 				NestedObject: aclPolicyRuleObject(),
@@ -94,11 +100,25 @@ func (*ACLPolicyResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
+type aclPolicyManagementValidator struct{}
+
+func (aclPolicyManagementValidator) Description(context.Context) string {
+	return "requires at least one management accept rule"
+}
+func (v aclPolicyManagementValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+func (aclPolicyManagementValidator) ValidateList(_ context.Context, req validator.ListRequest, resp *validator.ListResponse) {
+	if !req.ConfigValue.IsNull() && !req.ConfigValue.IsUnknown() && len(req.ConfigValue.Elements()) == 0 {
+		resp.Diagnostics.AddAttributeError(req.Path, "Missing management rules", "At least one management accept rule is required.")
+	}
+}
+
 func aclPolicyRuleObject() schema.NestedAttributeObject {
 	return schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
-		"name": schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across both lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows."},
+		"name": schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across all three lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows."},
 		"action": schema.StringAttribute{
-			Required: true, MarkdownDescription: "`accept` in `rules`; `drop` or `reject` in `drop_rules`.",
+			Required: true, MarkdownDescription: "`accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.",
 			Validators: []validator.String{aclActionValidator{}},
 		},
 		"protocol": schema.StringAttribute{
@@ -160,7 +180,7 @@ func (r *ACLPolicyResource) Configure(_ context.Context, req resource.ConfigureR
 	r.client = client
 }
 
-// modelACLPolicy maps the two ordered lists onto the same ACL rule parameters
+// modelACLPolicy maps the three ordered lists onto the same ACL rule parameters
 // that zyxel_acl_rule uses. The effective order is every accept, then every
 // drop/reject. Rule creation, service resolution and verification stay in the
 // shared ACL rule write path.
@@ -202,6 +222,8 @@ func modelACLPolicy(model aclPolicyModel) (zyxel.ACLPolicy, bool) {
 			p.Rules = append(p.Rules, rule)
 		}
 	}
+	appendRules(model.ManagementRules)
+	p.ManagementRules, p.Rules = p.Rules, nil
 	appendRules(model.Rules)
 	appendRules(model.DropRules)
 	return p, known
@@ -216,8 +238,9 @@ func recordResolvedPolicyProtocol(model *aclPolicyModel, rules []zyxel.ACLRule) 
 			}
 		}
 	}
-	record(model.Rules, 0)
-	record(model.DropRules, len(model.Rules))
+	record(model.ManagementRules, 0)
+	record(model.Rules, len(model.ManagementRules))
+	record(model.DropRules, len(model.ManagementRules)+len(model.Rules))
 }
 
 type aclPolicyProtocolDefault struct{}
@@ -250,7 +273,7 @@ func (aclPolicyProtocolDefault) PlanModifyString(ctx context.Context, req planmo
 func (*ACLPolicyResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	// Lists may contain expressions unknown during planning. Do not decode an
 	// unknown collection into a Go slice; the authoritative API validates apply.
-	for _, name := range []string{"rules", "drop_rules"} {
+	for _, name := range []string{"management_rules", "rules", "drop_rules"} {
 		var list types.List
 		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root(name), &list)...)
 		if resp.Diagnostics.HasError() {
@@ -311,6 +334,10 @@ func (*ACLPolicyResource) ValidateConfig(ctx context.Context, req resource.Valid
 			}
 		}
 	}
+	validate("management_rules", model.ManagementRules, func(action string) bool { return action == "accept" }, "Every management rule must use action = accept.")
+	if len(model.ManagementRules) == 0 {
+		resp.Diagnostics.AddAttributeError(path.Root("management_rules"), "Missing management rules", "At least one management accept rule is required.")
+	}
 	validate("rules", model.Rules, func(action string) bool { return action == "accept" }, "Every `rules` entry must use `action = \"accept\"`; put drops and rejects in `drop_rules`.")
 	validate("drop_rules", model.DropRules, func(action string) bool { return action == "drop" || action == "reject" }, "Every `drop_rules` entry must use `action = \"drop\"` or `\"reject\"`; put accepts in `rules`.")
 	p, known := modelACLPolicy(model)
@@ -326,7 +353,7 @@ func policyLedger(ctx context.Context, model aclPolicyModel) (zyxel.ACLPolicySta
 	p, _ := modelACLPolicy(model)
 	s := zyxel.ACLPolicyState{Generation: model.Generation.ValueString()}
 	diagnostics := model.RowNames.ElementsAs(ctx, &s.Names, false)
-	for i, r := range p.Rules {
+	for i, r := range append(append([]zyxel.ACLRule(nil), p.ManagementRules...), p.Rules...) {
 		if i >= len(s.Names) {
 			break
 		}
@@ -337,6 +364,9 @@ func policyLedger(ctx context.Context, model aclPolicyModel) (zyxel.ACLPolicySta
 			r.Name = s.Names[i]
 		}
 		s.Rules = append(s.Rules, r)
+		if i < len(p.ManagementRules) {
+			s.ManagementNames = append(s.ManagementNames, r.Name)
+		}
 	}
 	return s, diagnostics
 }
@@ -371,9 +401,12 @@ func (r *ACLPolicyResource) Create(ctx context.Context, req resource.CreateReque
 		resp.Diagnostics.AddError("Unknown ACL policy", "All policy rules must be known before creating router rows.")
 		return
 	}
-	recordResolvedPolicyProtocol(&model, p.Rules)
+	recordResolvedPolicyProtocol(&model, append(append([]zyxel.ACLRule(nil), p.ManagementRules...), p.Rules...))
 	out, err := r.client.ApplyACLPolicy(ctx, p, nil)
 	if err == nil || out.Changed {
+		if resp.Private != nil {
+			resp.Diagnostics.Append(storePolicyLedger(ctx, resp.Private, out.State)...)
+		}
 		resp.Diagnostics.Append(recordPolicyLedger(ctx, &model, out.State)...)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &model)...)
 	}
@@ -392,7 +425,7 @@ func (r *ACLPolicyResource) Read(ctx context.Context, req resource.ReadRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	ledger, d := policyLedger(ctx, model)
+	ledger, d := loadPolicyLedger(ctx, model, req.Private)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -433,13 +466,16 @@ func (r *ACLPolicyResource) Update(ctx context.Context, req resource.UpdateReque
 		resp.Diagnostics.AddError("Unknown ACL policy", "All policy rules must be known before updating router rows.")
 		return
 	}
-	recordResolvedPolicyProtocol(&plan, p.Rules)
-	ledger, d := policyLedger(ctx, prior)
+	recordResolvedPolicyProtocol(&plan, append(append([]zyxel.ACLRule(nil), p.ManagementRules...), p.Rules...))
+	ledger, d := loadPolicyLedger(ctx, prior, req.Private)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	out, err := r.client.ApplyACLPolicy(ctx, p, &ledger)
+	if resp.Private != nil && (err == nil || out.Changed) {
+		resp.Diagnostics.Append(storePolicyLedger(ctx, resp.Private, out.State)...)
+	}
 	if err != nil {
 		resp.Diagnostics.Append(recordPolicyLedger(ctx, &prior, out.State)...)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &prior)...)
@@ -463,7 +499,7 @@ func (r *ACLPolicyResource) Delete(ctx context.Context, req resource.DeleteReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	ledger, d := policyLedger(ctx, model)
+	ledger, d := loadPolicyLedger(ctx, model, req.Private)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -528,7 +564,9 @@ func (r *ACLPolicyResource) ImportState(ctx context.Context, req resource.Import
 			m.PacketsPerUnit = types.Int64Value(*rule.RateLimit)
 			m.RateLimitUnit = types.StringValue(rule.RateLimitUnit)
 		}
-		if rule.Action == "accept" {
+		if i < len(observed.ManagementNames) {
+			model.ManagementRules = append(model.ManagementRules, m)
+		} else if rule.Action == "accept" {
 			model.Rules = append(model.Rules, m)
 		} else {
 			model.DropRules = append(model.DropRules, m)
