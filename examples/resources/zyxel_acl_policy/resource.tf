@@ -3,10 +3,22 @@
 # interrupt router access. Use a maintenance window and ensure a recovery path is
 # available.
 # Choose ONE policy example per router; each resource owns the entire ACL tail.
+# Destination addresses are documentation placeholders. Set the source ranges
+# and management CIDRs for your network, and verify management port 443 applies.
 
 variable "https_source_ranges" {
-  type    = set(string)
-  default = ["198.51.100.0/24", "192.0.2.0/24"]
+  description = "Reviewed source CIDRs allowed to reach the HTTPS host."
+  type        = set(string)
+}
+
+variable "management_source_cidr" {
+  description = "Trusted administrator network that must retain router access."
+  type        = string
+}
+
+variable "router_management_cidr" {
+  description = "Router management IPv4 address with a /32 prefix."
+  type        = string
 }
 
 locals {
@@ -16,8 +28,8 @@ locals {
     protocol          = "tcp"
     ip_version        = "ipv4"
     direction         = "lan_to_router"
-    source_cidr       = "192.168.1.0/24"
-    destination_cidr  = "192.168.1.1/32"
+    source_cidr       = var.management_source_cidr
+    destination_cidr  = var.router_management_cidr
     destination_ports = "443"
   }]
   https_filter = {
@@ -90,24 +102,24 @@ resource "zyxel_acl_policy" "mixed" {
 
   rules = [
     {
-      name              = "WebDAV"
+      name              = "Web"
       action            = "accept"
       protocol          = "tcp"
       ip_version        = "ipv4"
       direction         = "wan_to_lan"
-      source_cidr       = "0.0.0.0/0"
+      source_cidr       = "198.51.100.0/24"
       destination_cidr  = "203.0.113.20/32"
-      destination_ports = "5006"
+      destination_ports = "8443"
     },
     {
-      name              = "VPN"
+      name              = "DNS"
       action            = "accept"
       protocol          = "udp"
       ip_version        = "ipv4"
       direction         = "wan_to_lan"
-      source_cidr       = "0.0.0.0/0"
+      source_cidr       = "198.51.100.0/24"
       destination_cidr  = "203.0.113.20/32"
-      destination_ports = "1194"
+      destination_ports = "53"
     },
   ]
 

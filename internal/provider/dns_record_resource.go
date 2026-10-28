@@ -41,7 +41,7 @@ func (r *DNSRecordResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages one local DNS host record (`Network Setting > DNS > DNS Entry`) that maps a host name to an IPv4 address. The router has no verified in-place update operation, so every configurable change replaces the record. Existing records must be imported by host name. Host names are compared without regard to letter case; the router's own entry limit still applies.",
 		Attributes: map[string]schema.Attribute{
-			"hostname":     schema.StringAttribute{Required: true, MarkdownDescription: "Canonical lowercase host name with at least two dot-separated labels, such as `nas.home.arpa`. Each label is 1-63 characters of letters, digits, hyphens, or underscores and starts and ends with a letter or digit. This is the natural identity and import key.", PlanModifiers: replaceString, Validators: []validator.String{dnsHostnameValidator{}}},
+			"hostname":     schema.StringAttribute{Required: true, MarkdownDescription: "Canonical lowercase host name with at least two dot-separated labels, such as `host.example.test`. Each label is 1-63 characters of letters, digits, hyphens, or underscores and starts and ends with a letter or digit. This is the natural identity and import key.", PlanModifiers: replaceString, Validators: []validator.String{dnsHostnameValidator{}}},
 			"ipv4_address": schema.StringAttribute{Required: true, MarkdownDescription: "IPv4 address returned for this host name. Changing it replaces the record.", PlanModifiers: replaceString, Validators: []validator.String{ipv4Validator{}}},
 			"router_index": schema.Int64Attribute{Computed: true, MarkdownDescription: "Current router list index used only as a locator. It may change when other records are added or removed and is not used as resource identity."},
 		},
@@ -156,7 +156,7 @@ func (r *DNSRecordResource) Delete(ctx context.Context, req resource.DeleteReque
 func (r *DNSRecordResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	hostname, err := zyxel.NormalizeHostname(req.ID)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("hostname"), "Invalid DNS record import ID", "Import ID must be a valid host name such as `nas.home.arpa`.")
+		resp.Diagnostics.AddAttributeError(path.Root("hostname"), "Invalid DNS record import ID", "Import ID must be a valid host name such as `host.example.test`.")
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("hostname"), hostname)...)
@@ -182,6 +182,6 @@ func (dnsHostnameValidator) ValidateString(_ context.Context, req validator.Stri
 	}
 	value := req.ConfigValue.ValueString()
 	if canonical, err := zyxel.NormalizeHostname(value); err != nil || canonical != value {
-		resp.Diagnostics.AddAttributeError(req.Path, "Invalid host name", "Value must be a canonical lowercase host name such as `nas.home.arpa`, with at least two dot-separated labels of 1-63 letters, digits, hyphens, or underscores that start and end with a letter or digit.")
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid host name", "Value must be a canonical lowercase host name such as `host.example.test`, with at least two dot-separated labels of 1-63 letters, digits, hyphens, or underscores that start and end with a letter or digit.")
 	}
 }

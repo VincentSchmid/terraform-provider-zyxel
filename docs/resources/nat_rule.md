@@ -12,11 +12,12 @@ Manages one supported router NAT rule. The router has no verified in-place updat
 ## Example Usage
 
 ```terraform
+# Replace the documentation address with your server's LAN address.
 resource "zyxel_nat_rule" "https" {
   name              = "HTTPS-to-server"
   protocol          = "tcp"
   external_ports    = "443"
-  internal_client   = "192.168.1.20"
+  internal_client   = "192.0.2.20"
   translation_ports = "443"
 }
 ```
@@ -29,10 +30,10 @@ Replacing an imported rule does not preserve interface selection or other
 settings outside this resource's schema. `protocol` accepts `tcp`,
 `udp`, `both`, or `all`, which map to `TCP`, `UDP`, `TCP+UDP`, and `ALL` on
 the router. `all` forwards every protocol, so it is broader than `both`.
-Use `external_ports` and `translation_ports` strings: `"5006"` is a single
-port (equal start and end), and `"5006-5007"` is an inclusive range. Wildcards,
+Use `external_ports` and `translation_ports` strings: `"8443"` is a single
+port (equal start and end), and `"8443-8444"` is an inclusive range. Wildcards,
 empty values, and port lists are not supported. Both ranges must have the same
-length. An equal-bound range such as `"5006-5006"` is also accepted.
+length. An equal-bound range such as `"8443-8443"` is also accepted.
 
 ## Upgrading to v2.0.0
 
@@ -43,8 +44,8 @@ they are no longer accepted. `internal_client`, rule names and resource
 addresses are unchanged.
 
 ```terraform
-external_ports    = "5006-5007"
-translation_ports = "5006-5007"
+external_ports    = "8443-8444"
+translation_ports = "8443-8444"
 ```
 
 Existing version-0 resource state is upgraded automatically, without router
@@ -82,11 +83,11 @@ NAT creation and deletion have not been verified on hardware.
 
 ### Required
 
-- `external_ports` (String) External port or inclusive range, such as `5006` or `5006-5007`. Ports must be canonical decimal numbers from 1 through 65535; wildcards are not supported. Must contain the same number of ports as `translation_ports`.
+- `external_ports` (String) External port or inclusive range, such as `8443` or `8443-8444`. Ports must be canonical decimal numbers from 1 through 65535; wildcards are not supported. Must contain the same number of ports as `translation_ports`.
 - `internal_client` (String) IPv4 address of the destination host.
 - `name` (String) Exact, nonempty router description. This is the natural identity and import key; leading and trailing whitespace are not allowed.
 - `protocol` (String) Transport protocol: `tcp`, `udp`, `both`, or `all`. The router stores these as `TCP`, `UDP`, `TCP+UDP`, or `ALL`; `all` forwards every protocol, which is not the same as `both`.
-- `translation_ports` (String) Destination port or inclusive range, such as `5006` or `5006-5007`. Ports must be canonical decimal numbers from 1 through 65535; wildcards are not supported. Must contain the same number of ports as `external_ports`.
+- `translation_ports` (String) Destination port or inclusive range, such as `8443` or `8443-8444`. Ports must be canonical decimal numbers from 1 through 65535; wildcards are not supported. Must contain the same number of ports as `external_ports`.
 
 ### Read-Only
 

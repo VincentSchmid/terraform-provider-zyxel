@@ -420,14 +420,14 @@ router `Index` as a durable identifier.
 Illustrative future HCL, after these resources are implemented:
 
 ```hcl
-resource "zyxel_dns_record" "nas" {
-  hostname     = "nas.home.arpa"
-  ipv4_address = "192.168.1.20"
+resource "zyxel_dns_record" "host" {
+  hostname     = "host.example.test"
+  ipv4_address = "192.0.2.20"
 }
 
-resource "zyxel_dhcp_reservation" "nas" {
+resource "zyxel_dhcp_reservation" "host" {
   mac_address  = "02:00:00:00:00:20"
-  ipv4_address = zyxel_dns_record.nas.ipv4_address
+  ipv4_address = zyxel_dns_record.host.ipv4_address
   enabled      = true
 }
 ```

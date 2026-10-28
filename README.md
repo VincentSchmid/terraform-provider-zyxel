@@ -43,7 +43,7 @@ terraform {
   required_providers {
     zyxel = {
       source  = "VincentSchmid/zyxel"
-      version = "~> 2.0"
+      version = "~> 6.1"
     }
   }
 }
@@ -61,9 +61,26 @@ a `dev_overrides` entry for this provider, remove it to use the published binary
 ## Provider configuration
 
 ```hcl
+variable "router_host" {
+  description = "Hostname or address of the router to manage."
+  type        = string
+}
+
+variable "router_username" {
+  description = "Router administrator username."
+  type        = string
+  sensitive   = true
+}
+
+variable "router_password" {
+  description = "Router administrator password."
+  type        = string
+  sensitive   = true
+}
+
 provider "zyxel" {
-  host            = "192.168.1.1"
-  username        = "admin"
+  host            = var.router_host
+  username        = var.router_username
   password        = var.router_password
   timeout_seconds = 10
 }
@@ -110,6 +127,14 @@ and in [`docs/`](docs), with examples in [`examples/`](examples).
 
 ## Example
 
+All examples use illustrative names, locally administered MAC addresses, reserved
+documentation IP ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
+and `2001:db8::/32`), and the reserved `example.test` domain. Replace them with
+values for your network before use. Interface paths, management access rules,
+and ACL positions must be selected for your router; examples are not a complete
+security policy. A provider block with no arguments uses `ZYXEL_HOST`,
+`ZYXEL_USER`, and `ZYXEL_PASS` from the environment.
+
 ```hcl
 provider "zyxel" {}
 
@@ -126,21 +151,23 @@ resource "zyxel_nat_rule" "https" {
   name              = "HTTPS"
   protocol          = "tcp"
   external_ports    = "443"
-  internal_client   = "192.168.1.240"
+  internal_client   = "192.0.2.20"
   translation_ports = "443"
 }
 
-resource "zyxel_dns_record" "nas" {
-  hostname     = "nas.home.arpa"
-  ipv4_address = "192.168.1.20"
+resource "zyxel_dns_record" "host" {
+  hostname     = "host.example.test"
+  ipv4_address = "192.0.2.20"
 }
 
-resource "zyxel_dhcp_reservation" "nas" {
+resource "zyxel_dhcp_reservation" "host" {
   mac_address  = "02:00:00:00:00:20"
-  ipv4_address = zyxel_dns_record.nas.ipv4_address
+  ipv4_address = zyxel_dns_record.host.ipv4_address
 }
 
-# Allow only Cloudflare to reach the HTTPS host, then drop everyone else.
+# Allow the published Cloudflare ranges to reach the example HTTPS host.
+# These accepts alone do not deny other sources. For an ordered allow/drop
+# policy, use zyxel_acl_policy as described in the ACL ordering section.
 data "zyxel_cloudflare_ipv4_ranges" "https" {}
 
 resource "zyxel_acl_rule" "cloudflare" {
@@ -148,9 +175,9 @@ resource "zyxel_acl_rule" "cloudflare" {
 
   name                   = "Cloudflare-${replace(each.value, "/", "-")}"
   action                 = "accept"
-  order                  = index(data.zyxel_cloudflare_ipv4_ranges.https.ranges, each.value) + 1
+  protocol               = "tcp"
   source_cidr            = each.value
-  destination_cidr       = "192.168.1.240/32"
+  destination_cidr       = "192.0.2.20/32"
   destination_port_start = 443
   destination_port_end   = 443
 }
@@ -225,10 +252,13 @@ Import examples:
 
 ```sh
 terraform import zyxel_nat_rule.https 'HTTPS'
-terraform import zyxel_acl_rule.cloudflare 'Cloudflare-104.16.0.0-13'
-terraform import zyxel_dhcp_reservation.nas '02:00:00:00:00:20'
-terraform import zyxel_dns_record.nas 'nas.home.arpa'
-terraform import zyxel_acl_policy.https '0123456789abcdef'
+# Import an existing row into the matching for_each instance; replace the CIDR
+# and exact rule name with values from your router and configuration.
+terraform import 'zyxel_acl_rule.cloudflare["198.51.100.0/24"]' 'Cloudflare-198.51.100.0-24'
+terraform import zyxel_dhcp_reservation.host '02:00:00:00:00:20'
+terraform import zyxel_dns_record.host 'host.example.test'
+# Use the complete observed tail and management count, not these example names.
+terraform import zyxel_acl_policy.https '7f:1:Management-gab,g7f-02,g7f-03'
 ```
 
 ## ACL Ordering And Policies
@@ -298,22 +328,32 @@ existing group with `interface_group_id = "Default"`, or create a group under
 **Network Setting > Interface Grouping** using `zyxel_interface_group`:
 
 ```hcl
-resource "zyxel_interface_group" "guests" {
-  name           = "Guests"
-  wan_interfaces = ["IP.Interface.2"]
-  lan_interfaces = ["Ethernet.Interface.2", "WiFi.SSID.3"]
+variable "wan_interface_paths" {
+  description = "WAN IpIfacePath values selected from this router's UI."
+  type        = set(string)
 }
 
-resource "zyxel_lan" "guests" {
-  interface_group_id   = zyxel_interface_group.guests.id
-  ip_address           = "192.168.20.1"
-  subnet_mask          = "255.255.255.0"
-  igmp_snooping        = "standard"
-  dns_mode             = "proxy"
+variable "lan_interface_paths" {
+  description = "LAN IntfPath values selected from this router's UI."
+  type        = set(string)
+}
+
+resource "zyxel_interface_group" "example" {
+  name           = "Example"
+  wan_interfaces = var.wan_interface_paths
+  lan_interfaces = var.lan_interface_paths
+}
+
+resource "zyxel_lan" "example" {
+  interface_group_id = zyxel_interface_group.example.id
+  ip_address         = "198.51.100.1"
+  subnet_mask        = "255.255.255.0"
+  igmp_snooping      = "standard"
+  dns_mode           = "proxy"
   dhcp = {
     mode                 = "server"
-    beginning_ip_address = "192.168.20.100"
-    ending_ip_address    = "192.168.20.200"
+    beginning_ip_address = "198.51.100.100"
+    ending_ip_address    = "198.51.100.200"
     auto_reserve_ip      = true
     dhcp_lease_time      = "1d"
   }
@@ -350,8 +390,8 @@ two applies: remove both resources, then recreate both; same-name group IDs do
 not trigger a LAN reapply on their own. No live hardware was contacted or changed.
 
 ```sh
-terraform import zyxel_interface_group.guests Guests
-terraform import zyxel_lan.guests Guests
+terraform import zyxel_interface_group.example Example
+terraform import zyxel_lan.example Example
 terraform import zyxel_lan.default Default
 ```
 

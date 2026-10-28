@@ -19,9 +19,10 @@ offers at most 20 entries) is authoritative.
 ## Example Usage
 
 ```terraform
-resource "zyxel_dns_record" "nas" {
-  hostname     = "nas.home.arpa"
-  ipv4_address = "192.168.1.20"
+# Replace the reserved example.test name and documentation address for your host.
+resource "zyxel_dns_record" "host" {
+  hostname     = "host.example.test"
+  ipv4_address = "192.0.2.20"
 }
 ```
 
@@ -50,7 +51,7 @@ entry creation and deletion have not been verified on hardware.
 
 ### Required
 
-- `hostname` (String) Canonical lowercase host name with at least two dot-separated labels, such as `nas.home.arpa`. Each label is 1-63 characters of letters, digits, hyphens, or underscores and starts and ends with a letter or digit. This is the natural identity and import key.
+- `hostname` (String) Canonical lowercase host name with at least two dot-separated labels, such as `host.example.test`. Each label is 1-63 characters of letters, digits, hyphens, or underscores and starts and ends with a letter or digit. This is the natural identity and import key.
 - `ipv4_address` (String) IPv4 address returned for this host name. Changing it replaces the record.
 
 ### Read-Only
@@ -64,7 +65,7 @@ that canonical form in configuration.
 
 ```shell
 # Import by host name; letter case is normalized to lowercase.
-terraform import zyxel_dns_record.nas 'nas.home.arpa'
+terraform import zyxel_dns_record.host 'host.example.test'
 ```
 
 An existing record must be imported before Terraform creates it. Multiple rows

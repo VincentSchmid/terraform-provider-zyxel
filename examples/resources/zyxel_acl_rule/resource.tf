@@ -1,3 +1,5 @@
+# Addresses and MACs are documentation placeholders. Choose unused ACL positions
+# after reviewing your router's complete rule table before applying.
 resource "zyxel_acl_rule" "https" {
   name              = "Allow-HTTPS-Example"
   action            = "accept"
@@ -27,7 +29,7 @@ resource "zyxel_acl_rule" "restricted_client" {
   action           = "reject"
   order            = 12
   direction        = "lan_to_wan"
-  mac_address      = "AA:BB:CC:DD:EE:FF"
+  mac_address      = "02:00:00:00:00:20"
   source_cidr      = "192.0.2.0/24"
   destination_cidr = "198.51.100.10/32"
   protocol         = "tcp_udp"

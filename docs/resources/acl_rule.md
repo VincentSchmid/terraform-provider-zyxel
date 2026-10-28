@@ -8,11 +8,13 @@ description: |-
 
 # zyxel_acl_rule (Resource)
 
-Manages one firewall ACL entry in the router's `firewall_acl` table. Interface selection is fixed to `ALL`, and schedule rules are not exposed yet. The protocol can be `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name; imported rows outside this supported profile are rejected. Set order for strict numeric placement, or omit it to append and compute the observed position. Rule-field changes require replacement because no safe in-place update or reorder operation has been verified; removing configured order only relinquishes numeric position management. Append cannot maintain a separate trailing drop set; use `zyxel_acl_policy` for an ordered accept list plus explicit `drop_rules`. See the ACL ordering and recovery guide. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
+Manages one firewall ACL entry in the router's `firewall_acl` table. Interface selection is fixed to `ALL`, and schedule rules are not exposed yet. The protocol can be `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`; the address family can be IPv4 or IPv6. MAC, custom service, TCP flag, and direction filters are supported. Optional packet rate limiting is supported for `accept` rules. Existing rows must be imported by exact name; imported rows outside this supported profile are rejected. Set order for strict numeric placement, or omit it to append and compute the observed position. Rule-field changes require replacement because no safe in-place update or reorder operation has been verified; removing configured order only relinquishes numeric position management. Append cannot maintain a separate trailing drop set; use zyxel_acl_policy for an ordered accept list plus explicit drop_rules. See the ACL ordering and recovery guide. The router applies order globally; this resource does not guarantee a complete firewall policy across independent resources or Terraform states.
 
 ## Example Usage
 
 ```terraform
+# Addresses and MACs are documentation placeholders. Choose unused ACL positions
+# after reviewing your router's complete rule table before applying.
 resource "zyxel_acl_rule" "https" {
   name              = "Allow-HTTPS-Example"
   action            = "accept"
@@ -42,7 +44,7 @@ resource "zyxel_acl_rule" "restricted_client" {
   action           = "reject"
   order            = 12
   direction        = "lan_to_wan"
-  mac_address      = "AA:BB:CC:DD:EE:FF"
+  mac_address      = "02:00:00:00:00:20"
   source_cidr      = "192.0.2.0/24"
   destination_cidr = "198.51.100.10/32"
   protocol         = "tcp_udp"
@@ -67,7 +69,7 @@ resource "zyxel_acl_rule" "restricted_client" {
 - `direction` (String) Traffic direction: `wan_to_lan`, `lan_to_wan`, `wan_to_router`, or `lan_to_router`. Defaults to `wan_to_lan`. Changing it replaces the ACL rule.
 - `enabled` (Boolean) Whether the ACL rule is enabled. Defaults to `true`; changing it replaces the rule.
 - `ip_version` (String) Address family for `source_cidr` and `destination_cidr`: `ipv4` or `ipv6`. Defaults to `ipv4`. With `ipv6` you must set both CIDRs explicitly to IPv6 networks because the default source remains `0.0.0.0/0`. Changing it replaces the ACL rule.
-- `mac_address` (String) Optional source MAC address filter in canonical uppercase six-octet colon-separated form (for example, `AA:BB:CC:DD:EE:FF`). Omit for any MAC address. Changing it replaces the ACL rule.
+- `mac_address` (String) Optional source MAC address filter in canonical uppercase six-octet colon-separated form (for example, `02:00:00:00:00:20`). Omit for any MAC address. Changing it replaces the ACL rule.
 - `order` (Number) Set a positive value for strict ordering: occupied positions are rejected and readback must match exactly. Omit (or set null) to append at max current order + 1 and record the observed firmware-assigned position, accepting compaction without replacement. Append verifies the rule is last and refuses accepts behind any enabled drop/reject or unknown action, even unrelated ones. No insertion/reorder or ongoing trailing-drop policy management is supported; see the ordering and recovery guide.
 - `packets_per_unit` (Number) Optional packet rate limit: number of matching packets allowed per `rate_limit_unit`, from 1 through 512. Omit to disable rate limiting. Rate limiting requires `action = "accept"` and changing it replaces the ACL rule.
 - `protocol` (String) Transport protocol: `all`, `tcp_udp`, `tcp`, `udp`, `icmp`, or `icmpv6`. Defaults to `tcp` for inline rules. Omit when using `service_id`; the neutral `all` value is then computed and the service selects the protocol. Changing it replaces the ACL rule.

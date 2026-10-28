@@ -1,3 +1,5 @@
+# Addresses are documentation placeholders. Choose an unused ACL position after
+# reviewing your router's complete rule table before applying.
 resource "zyxel_service" "https" {
   name              = "HTTPS"
   description       = "Secure web"

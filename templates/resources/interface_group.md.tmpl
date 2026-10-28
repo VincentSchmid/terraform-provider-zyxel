@@ -37,7 +37,7 @@ directly with `zyxel_lan.interface_group_id = "Default"`.
 ## Identity And Lifecycle
 
 The exact unique group name is both `id` and the import key. Reference it with
-`interface_group_id = zyxel_interface_group.guests.id`. `router_index` is only
+`interface_group_id = zyxel_interface_group.example.id`. `router_index` is only
 an observation; deletion resolves the current index by name and rejects
 duplicate names rather than guessing. A group removed outside Terraform is
 removed from state on refresh.

@@ -1,0 +1,25 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+{{.Description | plainmarkdown | trimspace | prefixlines "  "}}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description}}
+
+## Example Usage
+
+{{tffile .ExampleFile}}
+
+{{.SchemaMarkdown | trimspace}}
+
+## Import
+
+Import using the exact service name, not its native ID or display index:
+
+{{codefile "shell" .ImportFile}}
+
+An omitted port selector and `"*"` both mean any port. Imports represent any
+ports as omitted; explicit `"*"` values can be added to configuration afterward.

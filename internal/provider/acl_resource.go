@@ -100,7 +100,7 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				PlanModifiers:       replaceString, Validators: []validator.String{aclDirectionValidator{}},
 			},
 			"mac_address": schema.StringAttribute{
-				Optional: true, MarkdownDescription: "Optional source MAC address filter in canonical uppercase six-octet colon-separated form (for example, `AA:BB:CC:DD:EE:FF`). Omit for any MAC address. Changing it replaces the ACL rule.",
+				Optional: true, MarkdownDescription: "Optional source MAC address filter in canonical uppercase six-octet colon-separated form (for example, `02:00:00:00:00:20`). Omit for any MAC address. Changing it replaces the ACL rule.",
 				PlanModifiers: replaceString, Validators: []validator.String{aclMACValidator{}},
 			},
 			"service": schema.StringAttribute{

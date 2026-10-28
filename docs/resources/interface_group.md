@@ -14,21 +14,32 @@ Manages a port-based Network Setting > Interface Grouping entry. Its exact uniqu
 ```terraform
 # Interface paths depend on your router. Obtain WAN IpIfacePath values from
 # its WAN interface list and LAN IntfPath values from its LAN port list.
-resource "zyxel_interface_group" "guests" {
-  name           = "Guests"
-  wan_interfaces = ["IP.Interface.2"]
-  lan_interfaces = ["Ethernet.Interface.2", "WiFi.SSID.3"]
+variable "wan_interface_paths" {
+  description = "WAN IpIfacePath values selected from this router's UI."
+  type        = set(string)
 }
 
-resource "zyxel_lan" "guests" {
-  interface_group_id = zyxel_interface_group.guests.id
-  ip_address         = "192.168.20.1"
+variable "lan_interface_paths" {
+  description = "LAN IntfPath values selected from this router's UI."
+  type        = set(string)
+}
+
+resource "zyxel_interface_group" "example" {
+  name           = "Example"
+  wan_interfaces = var.wan_interface_paths
+  lan_interfaces = var.lan_interface_paths
+}
+
+# Addresses are documentation placeholders; substitute your actual LAN and pool.
+resource "zyxel_lan" "example" {
+  interface_group_id = zyxel_interface_group.example.id
+  ip_address         = "198.51.100.1"
   subnet_mask        = "255.255.255.0"
   igmp_snooping      = "standard"
   dhcp = {
     mode                 = "server"
-    beginning_ip_address = "192.168.20.100"
-    ending_ip_address    = "192.168.20.200"
+    beginning_ip_address = "198.51.100.100"
+    ending_ip_address    = "198.51.100.200"
     auto_reserve_ip      = true
     dhcp_lease_time      = "1d"
   }
@@ -59,7 +70,7 @@ directly with `zyxel_lan.interface_group_id = "Default"`.
 ## Identity And Lifecycle
 
 The exact unique group name is both `id` and the import key. Reference it with
-`interface_group_id = zyxel_interface_group.guests.id`. `router_index` is only
+`interface_group_id = zyxel_interface_group.example.id`. `router_index` is only
 an observation; deletion resolves the current index by name and rejects
 duplicate names rather than guessing. A group removed outside Terraform is
 removed from state on refresh.
@@ -98,5 +109,5 @@ local mocks, not hardware writes or an exact-model/firmware compatibility check.
 ## Import
 
 ```shell
-terraform import zyxel_interface_group.guests Guests
+terraform import zyxel_interface_group.example Example
 ```

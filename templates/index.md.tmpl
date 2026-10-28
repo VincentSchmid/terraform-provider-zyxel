@@ -1,11 +1,10 @@
 ---
-page_title: "{{.Name}} Provider"
-subcategory: ""
+page_title: "{{.ProviderName}} Provider"
 description: |-
   Manage Zyxel router configuration through the encrypted DAL HTTP API.
 ---
 
-# {{.Name}} Provider
+# {{.ProviderName}} Provider
 
 The Zyxel provider manages router configuration directly through the router's
 encrypted `DAL` HTTP API. It needs no CLI, Python, or agent at runtime.
@@ -30,7 +29,7 @@ terraform {
   required_providers {
     zyxel = {
       source  = "VincentSchmid/zyxel"
-      version = "~> 2.0"
+      version = "~> 6.1"
     }
   }
 }
@@ -47,27 +46,40 @@ version. For local development, see the
 
 ## Example Usage
 
+All examples use illustrative names, locally administered MAC addresses, reserved
+documentation IP ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`,
+and `2001:db8::/32`), and the reserved `example.test` domain. Replace them with
+values for your network before use. Interface paths, management access rules,
+and ACL positions must be selected for your router; examples are not a complete
+security policy. A provider block with no arguments uses `ZYXEL_HOST`,
+`ZYXEL_USER`, and `ZYXEL_PASS` from the environment.
+
 ```hcl
 provider "zyxel" {}
 
 data "zyxel_status" "router" {}
 
 resource "zyxel_nat_rule" "https" {
-  name                = "HTTPS"
-  protocol            = "tcp"
-  external_port_start = 443
-  external_port_end   = 443
-  internal_client     = "192.168.1.240"
-  internal_port_start = 443
-  internal_port_end   = 443
+  name              = "HTTPS"
+  protocol          = "tcp"
+  external_ports    = "443"
+  internal_client   = "192.0.2.20"
+  translation_ports = "443"
 }
 
-resource "zyxel_dhcp_reservation" "nas" {
+resource "zyxel_dns_record" "host" {
+  hostname     = "host.example.test"
+  ipv4_address = "192.0.2.20"
+}
+
+resource "zyxel_dhcp_reservation" "host" {
   mac_address  = "02:00:00:00:00:20"
-  ipv4_address = "192.168.1.20"
+  ipv4_address = zyxel_dns_record.host.ipv4_address
 }
 
-# Allow only Cloudflare to reach the HTTPS host, then drop everyone else.
+# Allow the published Cloudflare ranges to reach the example HTTPS host.
+# These accepts alone do not deny other sources. For an ordered allow/drop
+# policy, use zyxel_acl_policy as described in the ACL ordering section.
 # Each accept appends from the current table; no numeric order is configured.
 data "zyxel_cloudflare_ipv4_ranges" "https" {}
 
@@ -76,8 +88,9 @@ resource "zyxel_acl_rule" "cloudflare" {
 
   name              = "Cloudflare-${replace(each.value, "/", "-")}"
   action            = "accept"
+  protocol          = "tcp"
   source_cidr       = each.value
-  destination_cidr  = "192.168.1.240/32"
+  destination_cidr  = "192.0.2.20/32"
   destination_ports = "443"
 }
 ```

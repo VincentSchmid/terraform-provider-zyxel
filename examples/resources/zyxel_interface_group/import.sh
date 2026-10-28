@@ -1,1 +1,1 @@
-terraform import zyxel_interface_group.guests Guests
+terraform import zyxel_interface_group.example Example

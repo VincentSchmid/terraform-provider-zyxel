@@ -8,20 +8,20 @@ releases are ingested automatically; the one-time registry setup is complete.
 
 ## Releasing a version
 
-The next NAT schema release is **v2.0.0**: `external_ports` and
-`translation_ports` replace the four numeric port-bound arguments. This is a
-breaking configuration change from v1.0.0. Existing resource state is upgraded
-automatically; see the NAT resource's upgrade notes. Publish a new immutable
-major tag only after the implementation and generated documentation are merged
-and all tests pass. Do not publish this change under a v1 tag.
+Choose the version from the latest published tag: increment the patch for
+backward-compatible fixes or documentation changes, the minor for new
+backward-compatible features, and the major for breaking changes. Publish a new
+immutable tag only after the changes and generated documentation are merged and
+all tests pass.
 
 1. Make sure `main` builds, tests pass, and the docs are regenerated.
 2. Choose a new, unused semantic version, then tag the release commit and push it.
-   For example, for the next patch release:
+   For example, replacing `X.Y.Z` with the chosen patch version:
 
    ```sh
-   git tag v0.1.1
-   git push origin v0.1.1
+   version=X.Y.Z
+   git tag -a "v${version}" -m "Release v${version}"
+   git push origin "v${version}"
    ```
 
    There must be no branch with the same name as the tag. Pushing to `main`

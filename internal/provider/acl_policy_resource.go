@@ -116,7 +116,7 @@ func (aclPolicyManagementValidator) ValidateList(_ context.Context, req validato
 
 func aclPolicyRuleObject() schema.NestedAttributeObject {
 	return schema.NestedAttributeObject{Attributes: map[string]schema.Attribute{
-		"name": schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical rule name used as the router row name (for example `WebDAV` becomes `WebDAV-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across all three lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows."},
+		"name": schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical rule name used as the router row name (for example `Web` becomes `Web-g7f`). Use ASCII letters, digits, underscores or hyphens, unique across all three lists; surrounding whitespace is rejected. Omit for an unnamed `g7f-01` row. Changing a name stages a new generation and retires the old rows."},
 		"action": schema.StringAttribute{
 			Required: true, MarkdownDescription: "`accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.",
 			Validators: []validator.String{aclActionValidator{}},
