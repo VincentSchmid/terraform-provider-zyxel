@@ -1,9 +1,9 @@
 # Proposed Zyxel resource structure
 
 Status: **partially implemented**. Provider configuration, `zyxel_status`,
-`zyxel_dhcp_reservation`, and `zyxel_nat_rule` are implemented. Other resource
-proposals remain a discussion draft; their HCL examples do not run against
-the current provider.
+`zyxel_dhcp_reservation`, `zyxel_dns_record`, and `zyxel_nat_rule` are
+implemented. Other resource proposals remain a discussion draft; their HCL
+examples do not run against the current provider.
 
 ## Implemented IPv4 LAN And Interface Groups
 
@@ -78,6 +78,37 @@ preserve singleton identity for refresh/recovery. Missing or malformed settings
 are errors, never assumed disabled. Local encrypted mocks cover the contract;
 target-firmware and hardware writes remain unverified. No live mutation is
 performed.
+
+## Implemented DNS increment
+
+The user's request for the DNS Entry screen selects this first DNS increment:
+required `hostname` and IPv4 `ipv4_address`, with the canonical lowercase host
+name as identity and import key. The host name must contain at least two
+dot-separated labels, each 1-63 characters of ASCII letters, digits, hyphens, or
+underscores that starts and ends with a letter or digit, with at most 256
+characters in total. Configuration requires the canonical lowercase form;
+import accepts any letter case and stores the canonical form. Lookups compare
+host names without regard to letter case, and duplicate matches are errors.
+Several host names may resolve to the same address; only the name is unique.
+Every configurable change requires replacement because no in-place update is
+verified.
+
+Router indexes are computed as `router_index` and refreshed before deletion.
+Create rejects an existing host name rather than adopting it, and the boolean
+outcome preserves identity when a write is ambiguous. Reads reject malformed
+rows (missing or invalid index, host name, or non-IPv4 address). The router's own
+entry limit is authoritative; the web UI offers at most 20 entries. Local
+encrypted mock tests cover the lifecycle; hardware writes remain unverified and
+are not authorized by this implementation request.
+
+Protocol evidence: the same pinned extracted
+[Zyxel UI app.js](https://github.com/dennis-pellanda/Antigravity-REA/blob/5b3f570e3cbb5474892a72198c83a10ed6f8d08e/work/extracted_rootfs/web/static/js/app.js)
+contains the DNS Entry list (`/cgi-bin/DAL?oid=dns`) and `DNSRouteEdit`, which
+POSTs `{HostName, IPv4Address}`, PUTs the merged row including its `Index`, and
+DELETEs by `Index`, plus its `checkServerName` label validation. The provider
+still replaces changed records because no in-place update has been verified.
+`oid=dns_route` is a separate domain-based routing feature and is not managed by
+this resource.
 
 ## Implemented DHCP increment
 
@@ -177,7 +208,7 @@ it.
 
 | Priority | Terraform type | DAL OID | Proposed identity/import key | Main arguments |
 | --- | --- | --- | --- | --- |
-| 1 | `zyxel_dns_record` | `dns` | Hostname, unique within this router | `hostname`, `ipv4_address` |
+| Implemented | `zyxel_dns_record` | `dns` | Canonical lowercase host name; matched without regard to letter case | `hostname`, `ipv4_address` |
 | Implemented | `zyxel_dhcp_reservation` | `static_dhcp` | Canonical uppercase MAC address | `mac_address`, `ipv4_address`, `enabled` (true only); fixed default LAN bridge |
 | Implemented | `zyxel_acl_rule` | `firewall_acl` | Unique `name`; import existing rows before Terraform manages them | `name`, `action`, `order`, `protocol`, `ip_version`, `direction`, `source_cidr`, `destination_cidr`, destination/source port ranges, `mac_address`, `service`, `tcp_flag`, rate limit, `enabled` |
 | 4 | `zyxel_nat_rule` | `nat` | Unique `name` mapped to DAL `Description`; verify uniqueness first | `name`, `protocol`, `external_ports`, `internal_client`, `translation_ports`, `enabled` |
@@ -192,8 +223,7 @@ without changing identities.
 The existence of an `enabled` field in read/create payloads does not establish
 that arbitrary toggling is supported; test each transition before exposing it.
 
-DHCP is implemented with the narrow scope above; DNS remains proposed because
-its natural key is clearer than the remaining resources. ACL is a high-priority design candidate based on `firewall_cf.py`, but
+DHCP and DNS are implemented with the narrow scopes above. ACL is a high-priority design candidate based on `firewall_cf.py`, but
 its explicit order semantics need verification before production use. Develop
 against mocks, then verify router ordering, collision, deletion, and replacement
 behavior in an authorized live check. NAT and routes need additional conflict, interface, and update
@@ -411,8 +441,11 @@ addresses, and desired rules.
 1. **Client foundation — implemented:** local provider, environment/config
    resolution, encrypted client, status data source, separate consumer, mock tests.
 2. **DHCP — implemented:** enabled LAN reservations with MAC identity, duplicate
-   guards, import, and replacement; local mock verification only. DNS and broader
-   DHCP settings remain proposals.
+   guards, import, and replacement; local mock verification only. Broader DHCP
+   settings remain proposals.
+   **DNS — implemented:** local host records with canonical lowercase host-name
+   identity, duplicate guards, import, and replacement; local mock verification
+   only.
 3. **ACL — implemented:** Go resource, import, replacement, encrypted mock
    lifecycle tests, and consumer `acl.tf`. Live ordering behavior remains
    unverified; verify it under a separately authorized plan before production use.
@@ -422,8 +455,8 @@ addresses, and desired rules.
 5. **Live verification:** mock lifecycle tests first; any live mutations require
    separate user authorization and a concrete, reviewed plan.
 
-Suggested decisions for discussion: implement DNS next and extend DHCP only
-with further protocol evidence;
+Suggested decisions for discussion: extend DHCP only with further protocol
+evidence;
 use the implemented ACL resource with explicit reviewed orders;
 use unique NAT descriptions if acceptable; keep WAN/WiFi read-only initially;
 accept replacement only for fields whose update behavior is unverified. These

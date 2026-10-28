@@ -1,0 +1,55 @@
+---
+page_title: "{{.Name}} {{.Type}} - {{.ProviderName}}"
+subcategory: ""
+description: |-
+  {{.Description | plainmarkdown}}
+---
+
+# {{.Name}} ({{.Type}})
+
+{{.Description}}
+
+The exact `hostname` is the natural identity and import key. It must contain at
+least two dot-separated labels and is compared without regard to letter case.
+Configuration requires the canonical lowercase form; import accepts any letter
+case and stores that canonical form. Several host names may resolve to the same
+address, but a host name must be unique. The router's own entry limit (the web UI
+offers at most 20 entries) is authoritative.
+
+## Example Usage
+
+{{tffile .ExampleFile}}
+
+## Identity and changes
+
+Existing records must be imported before Terraform manages them; Create never
+adopts a matching record. Duplicate matches fail without changing the router.
+The computed `router_index` is an observed locator, not the Terraform identity.
+Delete reads the table again and resolves the host name to its current index.
+
+Every configurable change replaces the record because in-place updates have not
+been verified. Replacement deletes the old record before creating the new one, so
+name resolution is interrupted and a failed creation may leave the record absent.
+Do not use `create_before_destroy` when retaining the same host name.
+
+The create payload contains only `HostName` and `IPv4Address`, letting the router
+choose defaults for settings outside this resource's schema. A client lock
+serializes this provider's operations; it cannot coordinate other Terraform
+processes or router UI edits.
+
+The implementation is verified against local encrypted mock servers. Live DNS
+entry creation and deletion have not been verified on hardware.
+
+{{.SchemaMarkdown | trimspace}}
+
+## Import
+
+Import uses the record's host name. Letter case is normalized to lowercase; use
+that canonical form in configuration.
+
+{{codefile "shell" .ImportFile}}
+
+An existing record must be imported before Terraform creates it. Multiple rows
+matching the same host name are an error; the provider never chooses one
+arbitrarily. Missing records leave state on refresh, and deletion of an already
+absent record succeeds.

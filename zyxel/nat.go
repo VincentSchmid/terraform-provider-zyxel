@@ -198,7 +198,7 @@ func (s *routerSession) readNATRules(ctx context.Context) ([]NATRule, error) {
 func parseNATRule(row map[string]any) (NATRule, error) {
 	// Firmware can attach unrelated metadata to each row. Ignore it because the
 	// router's supported create payload omits interface-specific settings.
-	index, indexOK := natIndexValue(row["Index"])
+	index, indexOK := routerIndexValue(row["Index"])
 	enabled, enabledOK := row["Enable"].(bool)
 	name, nameOK := row["Description"].(string)
 	protocol, protocolOK := normalizedNATProtocol(row["Protocol"])
@@ -214,7 +214,8 @@ func parseNATRule(row map[string]any) (NATRule, error) {
 	return NATRule{Index: index, Name: name, Protocol: protocol, ExternalPortStart: externalStart, ExternalPortEnd: externalEnd, InternalClient: internalClient, InternalPortStart: internalStart, InternalPortEnd: internalEnd, Enabled: enabled}, nil
 }
 
-func natIndexValue(value any) (int64, bool) {
+// routerIndexValue decodes a DAL row index shared by list-oriented resources.
+func routerIndexValue(value any) (int64, bool) {
 	switch v := value.(type) {
 	case float64:
 		// JSON float64 indexes must be whole numbers within its exact integer
