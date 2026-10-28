@@ -11,6 +11,7 @@ zyxel/
     client.go                   HTTP, crypto, authentication, sessions
     status.go                   typed status projection
     dhcp.go                     DHCP types, validation, identity, operations
+    dns.go                      local DNS host records and host-name identity
     nat.go                      NAT types, validation, conflicts, operations
     acl.go                      ACL types, validation, profile, operations
     acl_policy.go               ordered ACL tail ownership and management-safe reconciliation
@@ -67,13 +68,14 @@ an explicit architecture decision, documentation update, and matching tests.
 
 ## Router Safety Contract
 
-- Natural identities are DHCP MACs and exact NAT/ACL names. Reads reject duplicate
-  matches. Missing DHCP/NAT reads return `nil, nil`; ACL retains
-  `ErrACLRuleNotFound`. The adapter decides how absence changes Terraform state.
+- Natural identities are DHCP MACs, canonical lowercase DNS host names, and exact
+  NAT/ACL names. Reads reject duplicate matches. Missing DHCP/DNS/NAT reads return
+  `nil, nil`; ACL retains `ErrACLRuleNotFound`. The adapter decides how absence
+  changes Terraform state.
 - Delete resolves current indexes within a serialized authenticated session,
   tolerates absent rows, preserves unrelated rows, and verifies readback.
 - Create rejects identity/conflict collisions rather than adopting existing rows.
-  DHCP/NAT return a boolean indicating creation succeeded or may have succeeded.
+  DHCP/DNS/NAT return a boolean indicating creation succeeded or may have succeeded.
   ACL returns `ACLCreateOutcome` with separate applied/ambiguous flags and an
   observed rule when available. An error does not necessarily mean no mutation.
 - Services use exact names for CRUD/import and expose native `Iid` as `id` for

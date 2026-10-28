@@ -95,6 +95,7 @@ processes and UI users are not coordinated by the process-local lock.
 | `zyxel_status` | data source | Model, firmware, hostname, uptime, resource use |
 | `zyxel_cloudflare_ipv4_ranges` | data source | Fetches Cloudflare's IPv4 list for firewall rules |
 | `zyxel_dhcp_reservation` | resource | Enabled static DHCP reservation by MAC address |
+| `zyxel_dns_record` | resource | Local DNS host record mapping a host name to an IPv4 address |
 | `zyxel_nat_rule` | resource | IPv4 port forwarding rule by service name |
 | `zyxel_acl_rule` | resource | Firewall ACL entry with IPv4/IPv6, protocol, MAC, service, TCP flag, direction, and rate-limit filters |
 | `zyxel_acl_policy` | resource | Required management accepts, normal accepts and denies, with verified management replacement |
@@ -129,9 +130,14 @@ resource "zyxel_nat_rule" "https" {
   translation_ports = "443"
 }
 
+resource "zyxel_dns_record" "nas" {
+  hostname     = "nas.home.arpa"
+  ipv4_address = "192.168.1.20"
+}
+
 resource "zyxel_dhcp_reservation" "nas" {
   mac_address  = "02:00:00:00:00:20"
-  ipv4_address = "192.168.1.20"
+  ipv4_address = zyxel_dns_record.nas.ipv4_address
 }
 
 # Allow only Cloudflare to reach the HTTPS host, then drop everyone else.
@@ -195,11 +201,13 @@ Service writes are covered by encrypted mocks, not verified hardware writes.
 
 ## Behavior of managed table entries
 
-The following behavior applies to DHCP reservations, NAT rules, services, and ACL rules.
+The following behavior applies to DHCP reservations, DNS records, NAT rules,
+services, and ACL rules.
 
 - **Names are identities.** `zyxel_nat_rule`, `zyxel_service`, and `zyxel_acl_rule` use the router
   entry name as identity and import key; `zyxel_dhcp_reservation` uses the MAC
-  address. Existing entries must be imported explicitly. Create never adopts an
+  address and `zyxel_dns_record` uses the canonical lowercase host name.
+  Existing entries must be imported explicitly. Create never adopts an
   existing entry, and duplicate matches are errors rather than guesses.
   `zyxel_acl_policy` owns generation-qualified rows through its `row_names`
   ledger, not a single name.
@@ -219,6 +227,7 @@ Import examples:
 terraform import zyxel_nat_rule.https 'HTTPS'
 terraform import zyxel_acl_rule.cloudflare 'Cloudflare-104.16.0.0-13'
 terraform import zyxel_dhcp_reservation.nas '02:00:00:00:00:20'
+terraform import zyxel_dns_record.nas 'nas.home.arpa'
 terraform import zyxel_acl_policy.https '0123456789abcdef'
 ```
 
