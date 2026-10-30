@@ -96,7 +96,7 @@ func (r *ACLRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			},
 			"direction": schema.StringAttribute{
 				Optional: true, Computed: true, Default: stringdefault.StaticString("wan_to_lan"),
-				MarkdownDescription: "Traffic direction: `wan_to_lan`, `lan_to_wan`, `wan_to_router`, or `lan_to_router`. Defaults to `wan_to_lan`. Changing it replaces the ACL rule.",
+				MarkdownDescription: "Traffic direction: `wan_to_lan`, `lan_to_wan`, `wan_to_router`, or `lan_to_router`. Defaults to `wan_to_lan`. Changing it replaces the ACL rule. Observed firmware limitation: `lan_to_router` rules do not block LAN-to-router access, even with `drop` or `reject`; devices on the LAN can still reach the router through its LAN interface.",
 				PlanModifiers:       replaceString, Validators: []validator.String{aclDirectionValidator{}},
 			},
 			"mac_address": schema.StringAttribute{

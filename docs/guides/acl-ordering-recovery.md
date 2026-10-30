@@ -6,6 +6,11 @@ description: |-
 
 # ACL Ordering, Policies And Recovery
 
+**Observed firmware limitation:** Rules with `direction = "lan_to_router"` do
+not block LAN-to-router access, even with `action = "drop"` or `"reject"`.
+Any device on the LAN can still reach the router through its LAN interface.
+Do not rely on ACL rules to restrict this access.
+
 ## Individual Rules
 
 `zyxel_acl_rule` keeps exact-name identity. Setting `order` preserves strict

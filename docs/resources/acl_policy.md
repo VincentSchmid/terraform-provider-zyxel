@@ -200,7 +200,7 @@ Required:
 
 - `action` (String) `accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.
 - `destination_cidr` (String) Canonical destination network in the selected address family.
-- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
+- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router. Observed firmware limitation: `lan_to_router` rules do not block LAN-to-router access, even with `drop` or `reject`; devices on the LAN can still reach the router through its LAN interface.
 - `ip_version` (String) ipv4 or ipv6.
 - `source_cidr` (String) Canonical source network in the selected address family.
 
@@ -225,7 +225,7 @@ Required:
 
 - `action` (String) `accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.
 - `destination_cidr` (String) Canonical destination network in the selected address family.
-- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
+- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router. Observed firmware limitation: `lan_to_router` rules do not block LAN-to-router access, even with `drop` or `reject`; devices on the LAN can still reach the router through its LAN interface.
 - `ip_version` (String) ipv4 or ipv6.
 - `source_cidr` (String) Canonical source network in the selected address family.
 
@@ -250,7 +250,7 @@ Required:
 
 - `action` (String) `accept` in `management_rules` and `rules`; `drop` or `reject` in `drop_rules`.
 - `destination_cidr` (String) Canonical destination network in the selected address family.
-- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.
+- `direction` (String) wan_to_lan, lan_to_wan, wan_to_router or lan_to_router. Observed firmware limitation: `lan_to_router` rules do not block LAN-to-router access, even with `drop` or `reject`; devices on the LAN can still reach the router through its LAN interface.
 - `ip_version` (String) ipv4 or ipv6.
 - `source_cidr` (String) Canonical source network in the selected address family.
 

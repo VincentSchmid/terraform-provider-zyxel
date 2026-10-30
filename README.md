@@ -249,6 +249,11 @@ terraform import zyxel_acl_policy.https '7f:1:Management-gab,g7f-02,g7f-03'
 
 ## ACL Ordering And Policies
 
+**Observed firmware limitation:** Rules with `direction = "lan_to_router"` do
+not block LAN-to-router access, even with `action = "drop"` or `"reject"`.
+Any device on the LAN can still reach the router through its LAN interface.
+Do not rely on ACL rules to restrict this access.
+
 For `zyxel_acl_rule`, an explicit `order` preserves strict collision/readback
 checks. Omit `order` to append from the current table and record the observed
 position without numeric-order drift. Appending accepts behind enabled

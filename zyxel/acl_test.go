@@ -49,6 +49,67 @@ func TestACLRulePayloadUsesScriptProfile(t *testing.T) {
 	}
 }
 
+// An unrestricted address is an empty GUI field with a host-length mask,
+// not the literal zero network that the GUI rejects.
+func TestACLWildcardPayloadAndReadback(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, anyCIDR, hostMask string
+	}{
+		{"ipv4", "ipv4", "0.0.0.0/0", "32"},
+		{"ipv6", "ipv6", "::/0", "128"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := testACLRule("wildcard", "drop", 42)
+			rule.IPVersion = tc.version
+			rule.SourceCIDR, rule.DestinationCIDR = tc.anyCIDR, tc.anyCIDR
+			payload, err := rule.dalPayload(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, fields := range [][2]string{{"SourceIP", "SourceMask"}, {"DestIP", "DestMask"}} {
+				if payload[fields[0]] != "" || payload[fields[1]] != tc.hostMask {
+					t.Fatalf("%s/%s = %v/%v; want empty address/%s", fields[0], fields[1], payload[fields[0]], payload[fields[1]], tc.hostMask)
+				}
+			}
+			// Firmware can retain the empty input or display it as Any.
+			for _, address := range []string{"", "Any"} {
+				row := fixtureACLRow("wildcard", 1, 42)
+				row["IPVersion"] = payload["IPVersion"]
+				row["SourceIP"], row["SourceMask"] = address, tc.hostMask
+				row["DestIP"], row["DestMask"] = address, tc.hostMask
+				observed, err := parseACLRule(row)
+				if err != nil || observed.SourceCIDR != tc.anyCIDR || observed.DestinationCIDR != tc.anyCIDR {
+					t.Fatalf("wildcard readback for %q: source=%q destination=%q err=%v", address, observed.SourceCIDR, observed.DestinationCIDR, err)
+				}
+			}
+		})
+	}
+}
+
+func TestACLWildcardCIDRPreservesLegacyAndRejectsInvalidMasks(t *testing.T) {
+	for _, tc := range []struct {
+		ip      any
+		mask    any
+		version int64
+		want    string
+	}{
+		{"0.0.0.0", "0", 4, "0.0.0.0/0"},
+		{"::", "0", 6, "::/0"},
+		{"", nil, 4, "0.0.0.0/0"},
+		{"Any", "", 6, "::/0"},
+		{"", "24", 4, ""},
+		{"", "129", 6, ""},
+		{"", "bogus", 4, ""},
+		{nil, "32", 4, ""},
+		{"192.0.2.10", "32", 4, "192.0.2.10/32"},
+	} {
+		got, ok := aclCIDR(tc.ip, tc.mask, tc.version)
+		if ok != (tc.want != "") || got != tc.want {
+			t.Errorf("aclCIDR(%v, %v, %d) = %q, %v; want %q", tc.ip, tc.mask, tc.version, got, ok, tc.want)
+		}
+	}
+}
+
 func TestACLRulePayloadMapsProtocols(t *testing.T) {
 	cases := map[string]string{
 		"all": "ALL", "tcp_udp": "TCPUDP", "tcp": "TCP",

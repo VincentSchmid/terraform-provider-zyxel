@@ -137,7 +137,7 @@ func aclPolicyRuleObject() schema.NestedAttributeObject {
 			Required: true, MarkdownDescription: "ipv4 or ipv6.", Validators: []validator.String{aclIPVersionValidator{}},
 		},
 		"direction": schema.StringAttribute{
-			Required: true, MarkdownDescription: "wan_to_lan, lan_to_wan, wan_to_router or lan_to_router.", Validators: []validator.String{aclDirectionValidator{}},
+			Required: true, MarkdownDescription: "wan_to_lan, lan_to_wan, wan_to_router or lan_to_router. Observed firmware limitation: `lan_to_router` rules do not block LAN-to-router access, even with `drop` or `reject`; devices on the LAN can still reach the router through its LAN interface.", Validators: []validator.String{aclDirectionValidator{}},
 		},
 		"source_cidr": schema.StringAttribute{
 			Required: true, MarkdownDescription: "Canonical source network in the selected address family.", Validators: []validator.String{aclCIDRValidator{}},
