@@ -1,6 +1,6 @@
 ---
 name: Zyxel Router
-description: Find user guides and online help for Zyxel routers relevant to this Terraform provider.
+description: Find Zyxel router documentation and write or update this Terraform provider's configuration examples and registry documentation.
 ---
 
 # Zyxel Router Documentation
@@ -47,3 +47,22 @@ recommendation for configuration, not a verified per-endpoint permission matrix.
 A successful login or status read does not prove write access. Check current
 project warnings before suggesting live write tests, and never change a router
 configuration without the user's authorization.
+
+## Terraform Examples
+
+- Use hardcoded illustrative values, not `variable` or `locals` blocks or
+  `var.*` / `local.*` references. Keep rule objects explicit rather than hiding
+  their fields behind `merge` or shared filters so readers can see every input.
+- Reference another resource or data source directly when a field depends on
+  it, for example `service_id = zyxel_service.https.id`. Declare prerequisites
+  first and put the resource being documented at the bottom of each example.
+  Move downstream consumers to their own resource examples instead of appending
+  them after the documented resource.
+- Use reserved documentation IP ranges, `example.test` hostnames, locally
+  administered MACs, and obvious dummy credentials. Explain which values must
+  be replaced; never include real credentials or imply the values fit hardware.
+- Keep `examples/`, README snippets, and documentation templates consistent.
+  Regenerate `docs/` with `tfplugindocs` after changing example sources, and
+  check that no variables or locals reappear in the rendered examples. Preserve
+  hand-written guides when regenerating; the generator can remove files that
+  have no corresponding template.

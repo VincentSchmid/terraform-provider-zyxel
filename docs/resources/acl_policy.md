@@ -26,60 +26,6 @@ migration, production writes or retrying a partial apply.
 # Destination addresses are documentation placeholders. Set the source ranges
 # and management CIDRs for your network, and verify management port 443 applies.
 
-variable "https_source_ranges" {
-  description = "Reviewed source CIDRs allowed to reach the HTTPS host."
-  type        = set(string)
-}
-
-variable "management_source_cidr" {
-  description = "Trusted administrator network that must retain router access."
-  type        = string
-}
-
-variable "router_management_cidr" {
-  description = "Router management IPv4 address with a /32 prefix."
-  type        = string
-}
-
-locals {
-  management_rules = [{
-    name              = "Management"
-    action            = "accept"
-    protocol          = "tcp"
-    ip_version        = "ipv4"
-    direction         = "lan_to_router"
-    source_cidr       = var.management_source_cidr
-    destination_cidr  = var.router_management_cidr
-    destination_ports = "443"
-  }]
-  https_filter = {
-    protocol          = "tcp"
-    ip_version        = "ipv4"
-    direction         = "wan_to_lan"
-    destination_cidr  = "203.0.113.10/32"
-    destination_ports = "443"
-  }
-}
-
-# Management rules precede normal accepts, then every drop rule. At least one drop
-# rule is required. Review unrelated prefix accepts for overlap before creating
-# this tail policy. Do not manage generated rows individually.
-resource "zyxel_acl_policy" "https" {
-  management_rules = local.management_rules
-
-  rules = [
-    for cidr in sort(tolist(var.https_source_ranges)) : merge(local.https_filter, {
-      action      = "accept"
-      source_cidr = cidr
-    })
-  ]
-
-  drop_rules = [merge(local.https_filter, {
-    action      = "drop"
-    source_cidr = "0.0.0.0/0"
-  })]
-}
-
 # A custom service replaces the inline protocol and port filters. Each rule can
 # reference its own service name or service_id; rules no longer have to share one
 # scope.
@@ -90,35 +36,107 @@ resource "zyxel_service" "https" {
   destination_ports = "443"
 }
 
-locals {
-  service_filter = {
+# Management rules precede normal accepts, then every drop rule. At least one drop
+# rule is required. Review unrelated prefix accepts for overlap before creating
+# this tail policy. Do not manage generated rows individually.
+resource "zyxel_acl_policy" "https" {
+  management_rules = [{
+    name              = "Management"
+    action            = "accept"
+    protocol          = "tcp"
+    ip_version        = "ipv4"
+    direction         = "lan_to_router"
+    source_cidr       = "192.0.2.0/24"
+    destination_cidr  = "192.0.2.1/32"
+    destination_ports = "443"
+  }]
+
+  rules = [
+    {
+      action            = "accept"
+      source_cidr       = "192.0.2.0/24"
+      protocol          = "tcp"
+      ip_version        = "ipv4"
+      direction         = "wan_to_lan"
+      destination_cidr  = "203.0.113.10/32"
+      destination_ports = "443"
+    },
+    {
+      action            = "accept"
+      source_cidr       = "198.51.100.0/24"
+      protocol          = "tcp"
+      ip_version        = "ipv4"
+      direction         = "wan_to_lan"
+      destination_cidr  = "203.0.113.10/32"
+      destination_ports = "443"
+    },
+  ]
+
+  drop_rules = [{
+    action            = "drop"
+    source_cidr       = "0.0.0.0/0"
+    protocol          = "tcp"
+    ip_version        = "ipv4"
+    direction         = "wan_to_lan"
+    destination_cidr  = "203.0.113.10/32"
+    destination_ports = "443"
+  }]
+}
+
+resource "zyxel_acl_policy" "https_service" {
+  management_rules = [{
+    name              = "Management"
+    action            = "accept"
+    protocol          = "tcp"
+    ip_version        = "ipv4"
+    direction         = "lan_to_router"
+    source_cidr       = "192.0.2.0/24"
+    destination_cidr  = "192.0.2.1/32"
+    destination_ports = "443"
+  }]
+
+  rules = [
+    {
+      action           = "accept"
+      source_cidr      = "192.0.2.0/24"
+      ip_version       = "ipv4"
+      direction        = "wan_to_lan"
+      destination_cidr = "203.0.113.10/32"
+      service_id       = zyxel_service.https.id
+    },
+    {
+      action           = "accept"
+      source_cidr      = "198.51.100.0/24"
+      ip_version       = "ipv4"
+      direction        = "wan_to_lan"
+      destination_cidr = "203.0.113.10/32"
+      service_id       = zyxel_service.https.id
+    },
+  ]
+
+  drop_rules = [{
+    action           = "drop"
+    source_cidr      = "0.0.0.0/0"
     ip_version       = "ipv4"
     direction        = "wan_to_lan"
     destination_cidr = "203.0.113.10/32"
     service_id       = zyxel_service.https.id
-  }
-}
-
-resource "zyxel_acl_policy" "https_service" {
-  management_rules = local.management_rules
-
-  rules = [
-    for cidr in sort(tolist(var.https_source_ranges)) : merge(local.service_filter, {
-      action      = "accept"
-      source_cidr = cidr
-    })
-  ]
-
-  drop_rules = [merge(local.service_filter, {
-    action      = "drop"
-    source_cidr = "0.0.0.0/0"
-  })]
+  }]
 }
 
 # Mixed-scope accepts are allowed; one or more drops follow them. The effective
 # order is management, then normal accepts, then drops.
 resource "zyxel_acl_policy" "mixed" {
-  management_rules = local.management_rules
+  management_rules = [{
+    name              = "Management"
+    action            = "accept"
+    protocol          = "tcp"
+    ip_version        = "ipv4"
+    direction         = "lan_to_router"
+    source_cidr       = "192.0.2.0/24"
+    destination_cidr  = "192.0.2.1/32"
+    destination_ports = "443"
+  }]
 
   rules = [
     {

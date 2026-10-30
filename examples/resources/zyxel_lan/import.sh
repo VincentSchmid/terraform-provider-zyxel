@@ -1,1 +1,1 @@
-terraform import zyxel_lan.default Default
+terraform import zyxel_lan.example Example

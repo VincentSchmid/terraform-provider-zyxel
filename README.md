@@ -61,30 +61,16 @@ a `dev_overrides` entry for this provider, remove it to use the published binary
 ## Provider configuration
 
 ```hcl
-variable "router_host" {
-  description = "Hostname or address of the router to manage."
-  type        = string
-}
-
-variable "router_username" {
-  description = "Router administrator username."
-  type        = string
-  sensitive   = true
-}
-
-variable "router_password" {
-  description = "Router administrator password."
-  type        = string
-  sensitive   = true
-}
-
 provider "zyxel" {
-  host            = var.router_host
-  username        = var.router_username
-  password        = var.router_password
+  host            = "http://192.0.2.1"
+  username        = "admin"
+  password        = "replace-with-router-password"
   timeout_seconds = 10
 }
 ```
+
+Replace these illustrative connection values before use. Do not commit real
+credentials; use `ZYXEL_USER` and `ZYXEL_PASS` for credentials outside configuration.
 
 | Attribute | Resolution | Notes |
 | --- | --- | --- |
@@ -328,20 +314,10 @@ existing group with `interface_group_id = "Default"`, or create a group under
 **Network Setting > Interface Grouping** using `zyxel_interface_group`:
 
 ```hcl
-variable "wan_interface_paths" {
-  description = "WAN IpIfacePath values selected from this router's UI."
-  type        = set(string)
-}
-
-variable "lan_interface_paths" {
-  description = "LAN IntfPath values selected from this router's UI."
-  type        = set(string)
-}
-
 resource "zyxel_interface_group" "example" {
   name           = "Example"
-  wan_interfaces = var.wan_interface_paths
-  lan_interfaces = var.lan_interface_paths
+  wan_interfaces = ["IP.Interface.2"]
+  lan_interfaces = ["Ethernet.Interface.2", "WiFi.SSID.3"]
 }
 
 resource "zyxel_lan" "example" {
@@ -425,7 +401,7 @@ Regenerate documentation after schema changes with
 [tfplugindocs](https://github.com/hashicorp/terraform-plugin-docs):
 
 ```sh
-go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs generate --provider-name zyxel
+go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@v0.25.0 generate --provider-name zyxel
 ```
 
 No section of this provider opens a `.env` file or reads credentials from disk.

@@ -24,11 +24,20 @@ output "cloudflare_ipv4_ranges" {
 }
 ```
 
-Terraform reads the data source during each plan, so plan output changes when Cloudflare updates the list. Use the result to build rule inputs, for example:
+Terraform reads the data source during each plan, so plan output changes when Cloudflare updates the list. Reference it directly to build rule inputs. These accepts alone do not deny other sources; use `zyxel_acl_policy` for an ordered allow/drop policy. Choose unused ACL positions and replace the documentation address before applying:
 
 ```terraform
-locals {
-  cloudflare_ipv4_ranges = data.zyxel_cloudflare_ipv4_ranges.cloudflare.ranges
+data "zyxel_cloudflare_ipv4_ranges" "cloudflare" {}
+
+resource "zyxel_acl_rule" "cloudflare" {
+  for_each = toset(data.zyxel_cloudflare_ipv4_ranges.cloudflare.ranges)
+
+  name              = "Cloudflare-${replace(each.value, "/", "-")}"
+  action            = "accept"
+  protocol          = "tcp"
+  source_cidr       = each.value
+  destination_cidr  = "192.0.2.20/32"
+  destination_ports = "443"
 }
 ```
 
