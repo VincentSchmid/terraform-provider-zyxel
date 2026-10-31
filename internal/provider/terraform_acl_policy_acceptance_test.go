@@ -235,6 +235,53 @@ func TestAccACLPolicy_growthShrinkRefreshAndImport(t *testing.T) {
 	}
 }
 
+func TestAccACLPolicy_wildcardRefreshPreservesLedger(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	f := newTerraformACLFixture(t)
+	config := policyTestConfig(f.server.URL, `["198.51.100.0/24"]`)
+	var ledger string
+	var posts, deletes, history int
+	check := func(s *terraform.State) error {
+		if got := policyStateImportID(s, "zyxel_acl_policy.https"); got != ledger {
+			return fmt.Errorf("wildcard refresh changed ownership ledger: %q != %q", got, ledger)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.posts != posts || f.deletes != deletes || len(f.history) != history {
+			return fmt.Errorf("wildcard refresh wrote router rows")
+		}
+		return nil
+	}
+	steps := []resource.TestStep{{Config: config, Check: func(s *terraform.State) error {
+		ledger = policyStateImportID(s, "zyxel_acl_policy.https")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		posts, deletes, history = f.posts, f.deletes, len(f.history)
+		return nil
+	}}}
+	for _, address := range []string{"Any", ""} {
+		steps = append(steps, resource.TestStep{
+			PreConfig: func() {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				for _, row := range f.rows {
+					if row["Target"] == "Drop" {
+						row["SourceIP"], row["SourceMask"] = address, "32"
+					}
+				}
+			},
+			Config: config, Check: check,
+			ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
+			ConfigStateChecks: []statecheck.StateCheck{
+				statecheck.ExpectKnownValue("zyxel_acl_policy.https", tfjsonpath.New("drop_rules").AtSliceIndex(0).AtMapKey("source_cidr"), knownvalue.StringExact("0.0.0.0/0")),
+			},
+		})
+	}
+	resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: steps})
+}
+
 func TestAccACLPolicy_partialCreateRetainsAllRows(t *testing.T) {
 	if !testingAcceptanceEnabled() {
 		t.Skip("set TF_ACC=1 for local mock acceptance tests")

@@ -1076,17 +1076,29 @@ func splitCanonicalCIDR(value string, version int64) (string, string, error) {
 	if prefix != prefix.Masked() {
 		return "", "", errors.New("must use the canonical network address for its prefix")
 	}
+	if prefix.Bits() == 0 {
+		// The GUI represents an unrestricted filter as an empty address with
+		// a host-length mask. Literal zero networks fail its IP validation.
+		return "", strconv.Itoa(prefix.Addr().BitLen()), nil
+	}
 	return prefix.Addr().String(), strconv.Itoa(prefix.Bits()), nil
 }
 
 func aclCIDR(ipValue, maskValue any, version int64) (string, bool) {
 	ip, ipOK := aclString(ipValue)
 	mask, maskOK := aclStringOrInt(maskValue)
+	if (!ipOK && ipValue != nil) || (!maskOK && maskValue != nil) {
+		return "", false
+	}
 	ip = strings.TrimSpace(ip)
 	mask = strings.TrimSpace(mask)
 	anyAddress := !ipOK || ip == "" || ip == "*" || strings.EqualFold(ip, "any")
 	anyMask := !maskOK || mask == "" || mask == "0"
-	if anyAddress && anyMask {
+	hostMask := "32"
+	if version == 6 {
+		hostMask = "128"
+	}
+	if anyAddress && (anyMask || (ipOK && maskOK && mask == hostMask)) {
 		if version == 6 {
 			return "::/0", true
 		}

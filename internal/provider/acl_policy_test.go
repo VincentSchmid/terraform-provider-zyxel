@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -302,6 +303,83 @@ func TestACLPolicyReadsLegacyThreeDigitGeneration(t *testing.T) {
 	}
 	if err := c.DeleteACLPolicy(ctx, out.State); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestACLPolicyWildcardRefreshPreservesOwnershipWithoutWrites(t *testing.T) {
+	for _, tc := range []struct {
+		version, cidr, hostMask string
+	}{
+		{"ipv4", "0.0.0.0/0", "32"},
+		{"ipv6", "::/0", "128"},
+	} {
+		for _, address := range []string{"", "Any"} {
+			t.Run(tc.version+"/"+address, func(t *testing.T) {
+				ctx := context.Background()
+				f := newTerraformACLFixture(t)
+				c := aclFixtureClient(t, f)
+				p := fixtureACLPolicy()
+				p.ManagementRules[0].Direction = "lan_to_router"
+				p.ManagementRules[0].SourceCIDR = "192.168.1.0/24"
+				p.ManagementRules[0].DestinationCIDR = "192.168.1.1/32"
+				p.Rules[0].IPVersion = tc.version
+				p.Rules[0].SourceCIDR, p.Rules[0].DestinationCIDR = tc.cidr, tc.cidr
+				out, err := c.ApplyACLPolicy(ctx, p, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.mu.Lock()
+				for _, row := range f.rows {
+					if row["Name"] == out.State.Names[1] {
+						row["SourceIP"], row["SourceMask"] = address, tc.hostMask
+						row["DestIP"], row["DestMask"] = address, tc.hostMask
+					}
+				}
+				posts, deletes, history := f.posts, f.deletes, len(f.history)
+				f.mu.Unlock()
+
+				observed, err := c.ReadACLPolicy(ctx, out.State)
+				if err != nil || !reflect.DeepEqual(observed, out.State) {
+					t.Fatalf("wildcard read changed ledger: %#v, %v", observed, err)
+				}
+				recovery, err := c.InspectACLPolicyRecovery(ctx, out.State)
+				if err != nil || recovery.Pending || !reflect.DeepEqual(recovery.State, out.State) {
+					t.Fatalf("wildcard recovery changed ledger: %#v, %v", recovery, err)
+				}
+
+				drop := testManagementModel()
+				drop.Name, drop.Action = types.StringNull(), types.StringValue("drop")
+				drop.Direction, drop.IPVersion = types.StringValue("wan_to_lan"), types.StringValue(tc.version)
+				drop.SourceCIDR, drop.DestinationCIDR = types.StringValue(tc.cidr), types.StringValue(tc.cidr)
+				model := aclPolicyModel{ManagementRules: []aclPolicyRuleModel{testManagementModel()}, DropRules: []aclPolicyRuleModel{drop}}
+				if d := recordPolicyLedger(ctx, &model, out.State); d.HasError() {
+					t.Fatal(d)
+				}
+				r := &ACLPolicyResource{client: c}
+				var schemaResp resource.SchemaResponse
+				r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+				if schemaResp.Diagnostics.HasError() {
+					t.Fatal(schemaResp.Diagnostics)
+				}
+				prior := tfsdk.State{Schema: schemaResp.Schema}
+				if d := prior.Set(ctx, model); d.HasError() {
+					t.Fatal(d)
+				}
+				resp := resource.ReadResponse{State: prior}
+				r.Read(ctx, resource.ReadRequest{State: prior}, &resp)
+				if len(resp.Diagnostics) != 0 {
+					t.Fatalf("wildcard refresh diagnostics: %v", resp.Diagnostics)
+				}
+				if !resp.State.Raw.Equal(prior.Raw) {
+					t.Fatal("wildcard refresh changed policy state or ownership ledger")
+				}
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if f.posts != posts || f.deletes != deletes || len(f.history) != history {
+					t.Fatal("wildcard read/refresh/recovery wrote router rows")
+				}
+			})
+		}
 	}
 }
 
