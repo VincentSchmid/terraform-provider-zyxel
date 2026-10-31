@@ -13,7 +13,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	testresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -43,7 +42,7 @@ func TestLogSettingsCreateRetainsUncertainIdentity(t *testing.T) {
 			var s resource.SchemaResponse
 			r.Schema(ctx, resource.SchemaRequest{}, &s)
 			plan := tfsdk.Plan{Schema: s.Schema}
-			m := logSettingsModel{ID: types.StringUnknown(), Enabled: types.BoolValue(true), Mode: types.StringValue("local")}
+			m := logSettingsModel{ID: types.StringUnknown(), Enabled: types.BoolValue(true)}
 			if d := plan.Set(ctx, &m); d.HasError() {
 				t.Fatal(d)
 			}
@@ -64,10 +63,8 @@ func TestLogSettingsUnknownAndNullValues(t *testing.T) {
 	client, f := logSettingsTestClient(t)
 	r := &LogSettingsResource{client: client}
 	for _, m := range []logSettingsModel{
-		{Enabled: types.BoolUnknown(), Mode: types.StringValue("local")},
-		{Enabled: types.BoolNull(), Mode: types.StringValue("local")},
-		{Enabled: types.BoolValue(true), Mode: types.StringUnknown()},
-		{Enabled: types.BoolValue(true), Mode: types.StringNull()},
+		{Enabled: types.BoolUnknown()},
+		{Enabled: types.BoolNull()},
 	} {
 		var d diag.Diagnostics
 		if r.apply(context.Background(), &m, &d) || !d.HasError() {
@@ -81,17 +78,6 @@ func TestLogSettingsUnknownAndNullValues(t *testing.T) {
 	}
 }
 
-func TestLogSettingsModeValidator(t *testing.T) {
-	for _, value := range []types.String{types.StringNull(), types.StringUnknown(), types.StringValue("local"), types.StringValue("remote"), types.StringValue("local_remote"), types.StringValue("Local"), types.StringValue("")} {
-		var resp validator.StringResponse
-		logModeValidator{}.ValidateString(context.Background(), validator.StringRequest{Path: path.Root("mode"), ConfigValue: value}, &resp)
-		invalid := value == types.StringValue("Local") || value == types.StringValue("")
-		if resp.Diagnostics.HasError() != invalid {
-			t.Fatalf("value=%v diagnostics=%v", value, resp.Diagnostics)
-		}
-	}
-}
-
 func TestLogSettingsReadAndDestroy(t *testing.T) {
 	client, f := logSettingsTestClient(t)
 	r := &LogSettingsResource{client: client}
@@ -101,7 +87,7 @@ func TestLogSettingsReadAndDestroy(t *testing.T) {
 	resp := resource.ReadResponse{State: tfsdk.State{Schema: s.Schema}}
 	r.Read(ctx, resource.ReadRequest{}, &resp)
 	var m logSettingsModel
-	if d := resp.State.Get(ctx, &m); d.HasError() || resp.Diagnostics.HasError() || m.ID.ValueString() != "router" || m.Enabled.ValueBool() || m.Mode.ValueString() != "local" {
+	if d := resp.State.Get(ctx, &m); d.HasError() || resp.Diagnostics.HasError() || m.ID.ValueString() != "router" || m.Enabled.ValueBool() {
 		t.Fatal(m, d, resp.Diagnostics)
 	}
 	f.Mu.Lock()
@@ -120,13 +106,12 @@ func TestLogSettingsReadAndDestroy(t *testing.T) {
 	}
 }
 
-func logSettingsTestHCL(endpoint string, enabled bool, mode string) string {
+func logSettingsTestHCL(endpoint string, enabled bool) string {
 	return networkProviderHCL(endpoint) + fmt.Sprintf(`
 resource "zyxel_log_settings" "router" {
   enabled = %t
-  mode = %q
 }
-`, enabled, mode)
+`, enabled)
 }
 
 func TestAccLogSettingsLifecycle(t *testing.T) {
@@ -135,11 +120,10 @@ func TestAccLogSettingsLifecycle(t *testing.T) {
 	}
 	_, f := logSettingsTestClient(t)
 	address := "zyxel_log_settings.router"
-	check := func(enabled, mode string) testresource.TestCheckFunc {
+	check := func(enabled string) testresource.TestCheckFunc {
 		return testresource.ComposeTestCheckFunc(
 			testresource.TestCheckResourceAttr(address, "id", "router"),
 			testresource.TestCheckResourceAttr(address, "enabled", enabled),
-			testresource.TestCheckResourceAttr(address, "mode", mode),
 		)
 	}
 	update := testresource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(address, plancheck.ResourceActionUpdate)}}
@@ -154,25 +138,30 @@ func TestAccLogSettingsLifecycle(t *testing.T) {
 			return nil
 		},
 		Steps: []testresource.TestStep{
-			{Config: logSettingsTestHCL(f.Server.URL, true, "local"), Check: check("true", "local")},
+			{Config: logSettingsTestHCL(f.Server.URL, true), Check: check("true")},
 			{ResourceName: address, ImportState: true, ImportStateId: "router", ImportStateVerify: true},
-			{Config: logSettingsTestHCL(f.Server.URL, false, "local"), ConfigPlanChecks: update, Check: check("false", "local")},
-			{Config: logSettingsTestHCL(f.Server.URL, true, "remote"), ConfigPlanChecks: update, Check: check("true", "remote")},
-			{Config: logSettingsTestHCL(f.Server.URL, true, "local_remote"), ConfigPlanChecks: update, Check: check("true", "local_remote")},
-			{Config: logSettingsTestHCL(f.Server.URL, true, "local"), ConfigPlanChecks: update, Check: check("true", "local")},
-			{PreConfig: func() { f.Mu.Lock(); f.Settings["Enable"] = false; f.Mu.Unlock() }, Config: logSettingsTestHCL(f.Server.URL, true, "local"), ConfigPlanChecks: update},
+			{Config: logSettingsTestHCL(f.Server.URL, false), ConfigPlanChecks: update, Check: check("false")},
+			{Config: logSettingsTestHCL(f.Server.URL, true), ConfigPlanChecks: update, Check: check("true")},
+			{PreConfig: func() { f.Mu.Lock(); f.Settings["Enable"] = false; f.Mu.Unlock() }, Config: logSettingsTestHCL(f.Server.URL, true), ConfigPlanChecks: update},
+			{PreConfig: func() { f.Mu.Lock(); f.Settings["LogMode"] = "Remote"; f.Mu.Unlock() }, Config: logSettingsTestHCL(f.Server.URL, true), ConfigPlanChecks: update, Check: check("true")},
+			{PreConfig: func() { f.Mu.Lock(); f.Settings["LogMode"] = "LocalRemote"; f.Mu.Unlock() }, Config: logSettingsTestHCL(f.Server.URL, true), ConfigPlanChecks: update, Check: check("true")},
 			{ResourceName: address, ImportState: true, ImportStateId: "invalid", ExpectError: regexp.MustCompile("import ID must be router")},
 		},
 	})
 }
 
-func TestAccLogSettingsInvalidMode(t *testing.T) {
+func TestAccLogSettingsRejectsModeAttribute(t *testing.T) {
 	if !testingAcceptanceEnabled() {
 		t.Skip("set TF_ACC=1 for local mock Terraform tests")
 	}
 	_, f := logSettingsTestClient(t)
 	testresource.Test(t, testresource.TestCase{ProtoV6ProviderFactories: natTestFactories, Steps: []testresource.TestStep{
-		{Config: logSettingsTestHCL(f.Server.URL, true, "invalid"), ExpectError: regexp.MustCompile("Invalid logging mode")},
+		{Config: networkProviderHCL(f.Server.URL) + `
+resource "zyxel_log_settings" "router" {
+  enabled = true
+  mode = "remote"
+}
+`, ExpectError: regexp.MustCompile("Unsupported argument")},
 	}})
 	f.Mu.Lock()
 	defer f.Mu.Unlock()

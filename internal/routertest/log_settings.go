@@ -85,8 +85,8 @@ func NewLogSettingsFixture(t *testing.T) *LogSettingsFixture {
 			if _, ok := body["Enable"].(bool); !ok {
 				t.Error("invalid logging Enable")
 			}
-			if mode := body["LogMode"]; mode != "Local" && mode != "Remote" && mode != "LocalRemote" {
-				t.Error("invalid logging LogMode")
+			if body["LogMode"] != "Local" {
+				t.Error("logging writes must select Local mode")
 			}
 			f.Writes++
 			if f.WriteResult == "ZCFG_SUCCESS" && !f.IgnoreWrite {

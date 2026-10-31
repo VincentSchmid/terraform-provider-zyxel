@@ -12,7 +12,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -29,7 +28,6 @@ type LogSettingsResource struct{ client *zyxel.Client }
 type logSettingsModel struct {
 	ID      types.String `tfsdk:"id"`
 	Enabled types.Bool   `tfsdk:"enabled"`
-	Mode    types.String `tfsdk:"mode"`
 }
 
 func (r *LogSettingsResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -38,17 +36,13 @@ func (r *LogSettingsResource) Metadata(_ context.Context, req resource.MetadataR
 
 func (r *LogSettingsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages the Syslog Logging switch and mode under Maintenance > Log Setting. Create adopts and configures the built-in settings; changes update in place. Remote server, port, TLS/certificates, email, and active log categories are preserved, not managed. Configure remote prerequisites on the router before selecting a remote mode. Manage only one instance per router, including across Terraform states. Destroy stops management without changing logging. Enabling logging records new events; it does not recover past events. Live writes have not been verified on hardware.",
+		MarkdownDescription: "Manages local-only logging under Maintenance > Log Setting. Create adopts and configures the built-in settings; changes update in place. Apply always selects Local File mode, stopping remote forwarding if a remote mode was previously selected. Remote server, port, TLS/certificates, email, and active log categories are preserved, not managed. Manage only one instance per router, including across Terraform states. Destroy stops management without changing logging. Enabling logging records new events; it does not recover past events. Live writes have not been verified on hardware.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed: true, MarkdownDescription: "Singleton identity, always `router`. Use `router` as the import ID.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
-			"enabled": schema.BoolAttribute{Required: true, MarkdownDescription: "Whether syslog logging is enabled."},
-			"mode": schema.StringAttribute{
-				Required: true, MarkdownDescription: "Logging destination: `local` (Local File), `remote` (Remote), or `local_remote` (Local File and Remote). Remote modes use the server, port, and TLS settings already configured on the router.",
-				Validators: []validator.String{logModeValidator{}},
-			},
+			"enabled": schema.BoolAttribute{Required: true, MarkdownDescription: "Whether local-only logging is enabled. Apply sets the logging switch to this value and always selects Local File mode. Refresh reports false if logging is disabled or a remote mode is selected."},
 		},
 	}
 }
@@ -70,19 +64,14 @@ func (r *LogSettingsResource) apply(ctx context.Context, plan *logSettingsModel,
 		diagnostics.AddError("Unconfigured Zyxel provider", "The Zyxel provider client is not configured.")
 		return false
 	}
-	for name, unknown := range map[string]bool{
-		"enabled": plan.Enabled.IsNull() || plan.Enabled.IsUnknown(),
-		"mode":    plan.Mode.IsNull() || plan.Mode.IsUnknown(),
-	} {
-		if unknown {
-			diagnostics.AddAttributeError(path.Root(name), "Unknown logging value", "The value must be known before applying logging settings.")
-		}
+	if plan.Enabled.IsNull() || plan.Enabled.IsUnknown() {
+		diagnostics.AddAttributeError(path.Root("enabled"), "Unknown logging value", "The value must be known before applying logging settings.")
 	}
 	if diagnostics.HasError() {
 		return false
 	}
 	plan.ID = types.StringValue("router")
-	applied, err := r.client.SetLogSettings(ctx, zyxel.LogSettings{Enabled: plan.Enabled.ValueBool(), Mode: plan.Mode.ValueString()})
+	applied, err := r.client.SetLogSettings(ctx, zyxel.LogSettings{Enabled: plan.Enabled.ValueBool()})
 	if err != nil {
 		detail := err.Error()
 		if applied {
@@ -114,7 +103,7 @@ func (r *LogSettingsResource) Read(ctx context.Context, _ resource.ReadRequest, 
 		resp.Diagnostics.AddError("Error reading logging settings", err.Error())
 		return
 	}
-	state := logSettingsModel{ID: types.StringValue("router"), Enabled: types.BoolValue(settings.Enabled), Mode: types.StringValue(settings.Mode)}
+	state := logSettingsModel{ID: types.StringValue("router"), Enabled: types.BoolValue(settings.Enabled)}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -139,23 +128,4 @@ func (r *LogSettingsResource) ImportState(ctx context.Context, req resource.Impo
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), "router")...)
-}
-
-type logModeValidator struct{}
-
-func (logModeValidator) Description(context.Context) string {
-	return "value must be local, remote, or local_remote"
-}
-
-func (v logModeValidator) MarkdownDescription(ctx context.Context) string {
-	return v.Description(ctx)
-}
-
-func (logModeValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
-	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
-		return
-	}
-	if value := req.ConfigValue.ValueString(); value != "local" && value != "remote" && value != "local_remote" {
-		resp.Diagnostics.AddAttributeError(req.Path, "Invalid logging mode", "mode must be local, remote, or local_remote.")
-	}
 }

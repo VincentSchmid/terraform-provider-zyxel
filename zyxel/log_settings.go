@@ -8,14 +8,12 @@ import (
 	"reflect"
 )
 
-// LogSettings contains the supported Maintenance > Log Setting controls.
+// LogSettings controls local-only logging under Maintenance > Log Setting.
 // Remote destinations, TLS, email, and log categories are left unchanged.
 type LogSettings struct {
+	// Enabled reports whether logging is enabled in Local mode, not a remote mode.
 	Enabled bool
-	Mode    string
 }
-
-var logModes = map[string]string{"local": "Local", "remote": "Remote", "local_remote": "LocalRemote"}
 
 func (c *Client) ReadLogSettings(ctx context.Context) (LogSettings, error) {
 	var settings LogSettings
@@ -27,20 +25,17 @@ func (c *Client) ReadLogSettings(ctx context.Context) (LogSettings, error) {
 	return settings, err
 }
 
-// SetLogSettings adopts and updates the built-in logging settings. The boolean
+// SetLogSettings adopts the built-in settings and always selects Local mode.
+// This stops remote forwarding if a remote mode was previously selected. The boolean
 // reports success or possible application; reconcile before retrying on error.
 func (c *Client) SetLogSettings(ctx context.Context, settings LogSettings) (bool, error) {
-	mode, ok := logModes[settings.Mode]
-	if !ok {
-		return false, errors.New("logging mode must be local, remote, or local_remote")
-	}
 	applied := false
 	err := c.withSession(ctx, func(s *routerSession) error {
 		current, before, err := s.readLogSettings(ctx)
 		if err != nil {
 			return err
 		}
-		if current == settings {
+		if current == settings && before["LogMode"] == "Local" {
 			applied = true
 			return nil
 		}
@@ -50,7 +45,7 @@ func (c *Client) SetLogSettings(ctx context.Context, settings LogSettings) (bool
 		for key, value := range before {
 			payload[key] = value
 		}
-		payload["Enable"], payload["LogMode"] = settings.Enabled, mode
+		payload["Enable"], payload["LogMode"] = settings.Enabled, "Local"
 		result, err := s.writeDAL(ctx, http.MethodPut, "logset", "", payload)
 		if err != nil {
 			var ambiguous *AmbiguousWriteError
@@ -66,7 +61,7 @@ func (c *Client) SetLogSettings(ctx context.Context, settings LogSettings) (bool
 		if err != nil {
 			return err
 		}
-		if current != settings {
+		if current != settings || after["LogMode"] != "Local" || after["Enable"] != settings.Enabled {
 			return errors.New("logging update could not be confirmed by readback")
 		}
 		for key, value := range before {
@@ -107,11 +102,12 @@ func (s *routerSession) readLogSettings(ctx context.Context) (LogSettings, map[s
 	if !ok {
 		return settings, nil, errors.New("router logging settings did not contain a valid Enable boolean")
 	}
-	for name, mode := range logModes {
-		if object["LogMode"] == mode {
-			settings.Mode = name
-			return settings, object, nil
-		}
+	switch object["LogMode"] {
+	case "Local":
+		return settings, object, nil
+	case "Remote", "LocalRemote":
+		settings.Enabled = false
+		return settings, object, nil
 	}
 	return settings, nil, errors.New("router returned an unsupported logging LogMode")
 }

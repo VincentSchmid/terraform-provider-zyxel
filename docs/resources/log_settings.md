@@ -3,22 +3,21 @@
 page_title: "zyxel_log_settings Resource - zyxel"
 subcategory: ""
 description: |-
-  Manages the Syslog Logging switch and mode under Maintenance > Log Setting. Create adopts and configures the built-in settings; changes update in place. Remote server, port, TLS/certificates, email, and active log categories are preserved, not managed. Configure remote prerequisites on the router before selecting a remote mode. Manage only one instance per router, including across Terraform states. Destroy stops management without changing logging. Enabling logging records new events; it does not recover past events. Live writes have not been verified on hardware.
+  Manages local-only logging under Maintenance > Log Setting. Create adopts and configures the built-in settings; changes update in place. Apply always selects Local File mode, stopping remote forwarding if a remote mode was previously selected. Remote server, port, TLS/certificates, email, and active log categories are preserved, not managed. Manage only one instance per router, including across Terraform states. Destroy stops management without changing logging. Enabling logging records new events; it does not recover past events. Live writes have not been verified on hardware.
 ---
 
 # zyxel_log_settings (Resource)
 
-Manages the Syslog Logging switch and mode under Maintenance > Log Setting. Create adopts and configures the built-in settings; changes update in place. Remote server, port, TLS/certificates, email, and active log categories are preserved, not managed. Configure remote prerequisites on the router before selecting a remote mode. Manage only one instance per router, including across Terraform states. Destroy stops management without changing logging. Enabling logging records new events; it does not recover past events. Live writes have not been verified on hardware.
+Manages local-only logging under Maintenance > Log Setting. Create adopts and configures the built-in settings; changes update in place. Apply always selects Local File mode, stopping remote forwarding if a remote mode was previously selected. Remote server, port, TLS/certificates, email, and active log categories are preserved, not managed. Manage only one instance per router, including across Terraform states. Destroy stops management without changing logging. Enabling logging records new events; it does not recover past events. Live writes have not been verified on hardware.
 
 ## Example Usage
 
 ```terraform
 provider "zyxel" {}
 
-# Record new events in the router's local log file.
+# Record new events locally. Apply selects Local File mode, stopping remote forwarding.
 resource "zyxel_log_settings" "router" {
   enabled = true
-  mode    = "local"
 }
 ```
 
@@ -27,8 +26,7 @@ resource "zyxel_log_settings" "router" {
 
 ### Required
 
-- `enabled` (Boolean) Whether syslog logging is enabled.
-- `mode` (String) Logging destination: `local` (Local File), `remote` (Remote), or `local_remote` (Local File and Remote). Remote modes use the server, port, and TLS settings already configured on the router.
+- `enabled` (Boolean) Whether local-only logging is enabled. Apply sets the logging switch to this value and always selects Local File mode. Refresh reports false if logging is disabled or a remote mode is selected.
 
 ### Read-Only
 

@@ -21,23 +21,11 @@ func logSettingsClient(t *testing.T) (*zyxel.Client, *routertest.LogSettingsFixt
 	return c, f
 }
 
-func TestLogSettingsValidatesBeforeNetwork(t *testing.T) {
-	c, _ := zyxel.NewClient("http://127.0.0.1:1", zyxel.Credentials{}, time.Second)
-	for _, mode := range []string{"", "Local", "invalid"} {
-		applied, err := c.SetLogSettings(context.Background(), zyxel.LogSettings{Enabled: true, Mode: mode})
-		if applied || err == nil || !strings.Contains(err.Error(), "logging mode must be") {
-			t.Fatalf("invalid mode reached network: applied=%t err=%v", applied, err)
-		}
-	}
-}
-
-func TestLogSettingsModesAndAdoption(t *testing.T) {
+func TestLogSettingsLocalAndAdoption(t *testing.T) {
 	c, f := logSettingsClient(t)
 	ctx := context.Background()
 	for _, settings := range []zyxel.LogSettings{
-		{Enabled: false, Mode: "local"}, {Enabled: true, Mode: "local"},
-		{Enabled: true, Mode: "remote"}, {Enabled: true, Mode: "local_remote"},
-		{Enabled: false, Mode: "local_remote"},
+		{Enabled: false}, {Enabled: true}, {Enabled: false}, {Enabled: true},
 	} {
 		if applied, err := c.SetLogSettings(ctx, settings); !applied || err != nil {
 			t.Fatal(applied, err)
@@ -59,8 +47,33 @@ func TestLogSettingsModesAndAdoption(t *testing.T) {
 	}
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
-	if f.Writes != 4 || f.Settings["Server"] != "syslog.example.test" || f.Settings["Email"] != false {
+	if f.Writes != 3 || f.Settings["LogMode"] != "Local" || f.Settings["Server"] != "syslog.example.test" || f.Settings["Email"] != false {
 		t.Fatalf("unexpected writes or unmanaged settings: %d %+v", f.Writes, f.Settings)
+	}
+}
+
+func TestLogSettingsRemoteDrift(t *testing.T) {
+	for _, mode := range []string{"Remote", "LocalRemote"} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%t", mode, enabled), func(t *testing.T) {
+				c, f := logSettingsClient(t)
+				f.Mu.Lock()
+				f.Settings["Enable"], f.Settings["LogMode"] = true, mode
+				f.Mu.Unlock()
+				got, err := c.ReadLogSettings(context.Background())
+				if err != nil || got.Enabled {
+					t.Fatal("remote mode must not appear as enabled local-only logging", got, err)
+				}
+				if applied, err := c.SetLogSettings(context.Background(), zyxel.LogSettings{Enabled: enabled}); !applied || err != nil {
+					t.Fatal(applied, err)
+				}
+				f.Mu.Lock()
+				defer f.Mu.Unlock()
+				if f.Writes != 1 || f.Settings["Enable"] != enabled || f.Settings["LogMode"] != "Local" {
+					t.Fatal("apply did not select Local mode", f.Writes, f.Settings)
+				}
+			})
+		}
 	}
 }
 
@@ -83,7 +96,7 @@ func TestLogSettingsRejectsMalformedReads(t *testing.T) {
 			if _, err := c.ReadLogSettings(context.Background()); err == nil {
 				t.Fatal("accepted malformed read")
 			}
-			applied, err := c.SetLogSettings(context.Background(), zyxel.LogSettings{Enabled: true, Mode: "local"})
+			applied, err := c.SetLogSettings(context.Background(), zyxel.LogSettings{Enabled: true})
 			f.Mu.Lock()
 			defer f.Mu.Unlock()
 			if applied || err == nil || f.Writes != 0 || strings.Contains(err.Error(), "secret-unsupported") {
@@ -114,7 +127,7 @@ func TestLogSettingsWriteFailures(t *testing.T) {
 			f.Mu.Lock()
 			tc.setup(f)
 			f.Mu.Unlock()
-			applied, err := c.SetLogSettings(context.Background(), zyxel.LogSettings{Enabled: true, Mode: "local"})
+			applied, err := c.SetLogSettings(context.Background(), zyxel.LogSettings{Enabled: true})
 			f.Mu.Lock()
 			defer f.Mu.Unlock()
 			if err == nil || applied != tc.applied || f.Writes != tc.writes {

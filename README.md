@@ -118,7 +118,7 @@ processes and UI users are not coordinated by the process-local lock.
 | `zyxel_acl_policy` | resource | Required management accepts, normal accepts and denies, with verified management replacement |
 | `zyxel_service` | resource | Reusable firewall protocol/service object referenced by ACL ID |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
-| `zyxel_log_settings` | resource | Router-wide logging switch and local/remote mode, preserving other log settings |
+| `zyxel_log_settings` | resource | Router-wide local-only logging, preserving unrelated log settings |
 | `zyxel_interface_group` | resource | Port-based interface groups, referenced by exact-name ID |
 | `zyxel_lan` | resource | Per-group IPv4 LAN address, IGMP snooping, DHCP server/disable/relay |
 
@@ -151,7 +151,6 @@ resource "zyxel_firewall" "router" {
 # Record new events locally; view them under System Monitor > Log.
 resource "zyxel_log_settings" "router" {
   enabled = true
-  mode    = "local"
 }
 
 resource "zyxel_nat_rule" "https" {
