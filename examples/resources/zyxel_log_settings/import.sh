@@ -1,0 +1,1 @@
+terraform import zyxel_log_settings.router router
