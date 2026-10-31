@@ -5,7 +5,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 > **Status: experimental.** Read paths and the mock-router lifecycle tests pass,
 > and a read-only `terraform plan` has been verified against a physical router.
-> **Live writes (NAT, DHCP, firewall ACL, services, general firewall settings, LAN, and interface groups) have not been verified on hardware.**
+> **Live writes (NAT, DHCP, firewall ACL, services, general firewall settings, logging, LAN, and interface groups) have not been verified on hardware.**
 > Review every plan before applying, and keep a router configuration backup.
 
 ## Requirements
@@ -17,7 +17,7 @@ encrypted `DAL` HTTP API. No CLI, Python, or separate agent is needed at runtime
 
 The provider uses the public, Terraform-independent
 `github.com/VincentSchmid/terraform-provider-zyxel/zyxel` Go package. It provides
-typed status, DHCP, NAT, ACL, firewall-settings, LAN, and interface-group operations, with session locking,
+typed status, DHCP, NAT, ACL, firewall-settings, logging, LAN, and interface-group operations, with session locking,
 identity resolution, validation, and write verification. Other Go programs can
 import it without importing the Terraform adapter.
 
@@ -104,6 +104,7 @@ processes and UI users are not coordinated by the process-local lock.
 | `zyxel_acl_policy` | resource | Required management accepts, normal accepts and denies, with verified management replacement |
 | `zyxel_service` | resource | Reusable firewall protocol/service object referenced by ACL ID |
 | `zyxel_firewall` | resource | Router-wide IPv4/IPv6 firewall, security level, and DoS protection |
+| `zyxel_log_settings` | resource | Router-wide local-only logging, preserving unrelated log settings |
 | `zyxel_interface_group` | resource | Port-based interface groups, referenced by exact-name ID |
 | `zyxel_lan` | resource | Per-group IPv4 LAN address, IGMP snooping, DHCP server/disable/relay |
 
@@ -131,6 +132,11 @@ resource "zyxel_firewall" "router" {
   ipv6_enabled           = true
   security_level         = "medium"
   dos_protection_enabled = true
+}
+
+# Record new events locally; view them under System Monitor > Log.
+resource "zyxel_log_settings" "router" {
+  enabled = true
 }
 
 resource "zyxel_nat_rule" "https" {

@@ -17,6 +17,7 @@ zyxel/
     acl_policy.go               ordered ACL tail ownership and management-safe reconciliation
     service.go                  reusable protocol services and compact port syntax
     firewall.go                 router-wide General and DoS settings
+    log_settings.go             router-wide local-only logging
     lan.go                      per-group IPv4 LAN/DHCP settings
     interface_group.go          port-based groups and bridge-port resolution
     *_test.go                   API tests and public usage example
@@ -87,6 +88,13 @@ an explicit architecture decision, documentation update, and matching tests.
   relinquishes management without changing protection.
 - The API reports uncertainty; Terraform preserves recoverable identity in state.
   Direct Go callers must also reconcile before retrying uncertain writes.
+- Logging settings are a built-in singleton. `SetLogSettings` uses the supplied
+  `logset` read/copy/PUT workflow, changing only `Enable` and `LogMode` (always
+  Local, which stops remote forwarding) and
+  verifying both the requested values and preservation of all other fields.
+  Remote destinations, TLS/certificates, email, and categories remain unmanaged.
+  Reads report enabled only for enabled Local mode, detecting remote-mode drift.
+  Create adopts settings; destroy relinquishes management without disabling logs.
 - Locks cover all clients with the same normalized endpoint in this process,
   not endpoint aliases, other processes or web-UI users.
   Never automatically retry ambiguous writes.
