@@ -22,20 +22,23 @@ import (
 // This fixture is an independent protocol peer for real Terraform tests. All
 // provider credentials point to this loopback server, never to the real router.
 type terraformACLFixture struct {
-	mu                  sync.Mutex
-	server              *httptest.Server
-	key                 *rsa.PrivateKey
-	sessions            map[string]*terraformACLSession
-	rows                []map[string]any
-	services            []map[string]any
-	serviceSequence     int
-	sequence            int
-	posts               int
-	deletes             int
-	forceOrder          bool
-	compactOrders       bool
-	rejectOccupiedOrder bool
-	maxACLRows          int
+	mu                    sync.Mutex
+	server                *httptest.Server
+	key                   *rsa.PrivateKey
+	sessions              map[string]*terraformACLSession
+	rows                  []map[string]any
+	services              []map[string]any
+	serviceSequence       int
+	serviceEvents         []string
+	serviceDeleteAttempts int
+	serviceDeleteBlocked  int
+	sequence              int
+	posts                 int
+	deletes               int
+	forceOrder            bool
+	compactOrders         bool
+	rejectOccupiedOrder   bool
+	maxACLRows            int
 	// capacityResult is the rejection the firmware returns for a create at
 	// capacity. Empty means the generic parameter rejection.
 	capacityResult      string
@@ -212,13 +215,24 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 					body["Protocol"] = body["ProtocolNumber"]
 				}
 				f.services = append(f.services, body)
+				f.serviceEvents = append(f.serviceEvents, fmt.Sprintf("create:%d", fixtureInt(body["Iid"])))
 				f.failNextRead = f.failReadback
 			case http.MethodDelete:
+				f.serviceDeleteAttempts++
 				index, _ := strconv.Atoi(r.URL.Query().Get("Index"))
 				if index < 1 || index > len(f.services) {
 					http.Error(w, "invalid service index", 400)
 					return
 				}
+				iid := fixtureInt(f.services[index-1]["Iid"])
+				for _, row := range f.rows {
+					if fixtureInt(row["X_ZYXEL_ServiceIndex"]) == iid {
+						f.serviceDeleteBlocked++
+						f.reply(w, s, map[string]any{"result": "ZCFG_INVALID_PARAM_VALUE"})
+						return
+					}
+				}
+				f.serviceEvents = append(f.serviceEvents, fmt.Sprintf("delete:%d", iid))
 				f.services = append(f.services[:index-1], f.services[index:]...)
 			default:
 				http.Error(w, "unsupported service write", 405)
@@ -285,6 +299,9 @@ func (f *terraformACLFixture) serveHTTP(w http.ResponseWriter, r *http.Request) 
 				f.mutateCreate(body)
 			}
 			f.rows = append(f.rows, body)
+			if iid := fixtureInt(body["X_ZYXEL_ServiceIndex"]); iid != 0 {
+				f.serviceEvents = append(f.serviceEvents, fmt.Sprintf("reference:%d", iid))
+			}
 			f.posts++
 			f.failNextRead = f.failReadback
 		case http.MethodDelete:

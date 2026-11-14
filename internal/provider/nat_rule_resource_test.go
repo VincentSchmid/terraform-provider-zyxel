@@ -12,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,9 +144,17 @@ func TestNATRuleCreateAmbiguousWritePreservesCreatedIdentity(t *testing.T) {
 }
 
 func TestNATResourceCreateKeepsKnownStateAfterAmbiguousPOST(t *testing.T) {
+	for _, mode := range []string{"decode", "drop", "http", "missing", "mismatch", "malformed", "duplicate", "read-failure", "placeholder", "reject-placeholder"} {
+		t.Run(mode, func(t *testing.T) { testNATResourceRecoverableState(t, mode) })
+	}
+}
+
+func testNATResourceRecoverableState(t *testing.T, mode string) {
+	t.Helper()
 	client, state, closeServer := newNATMockClient(t, nil)
 	defer closeServer()
-	state.badWriteResponse = true
+	state.badWriteResponse = mode == "decode"
+	state.createMode = mode
 	r := &NATRuleResource{client: client}
 	ctx := context.Background()
 	var schemaResponse resource.SchemaResponse
@@ -174,6 +184,16 @@ func TestNATResourceCreateKeepsKnownStateAfterAmbiguousPOST(t *testing.T) {
 	}
 	if saved.Name.ValueString() != planned.Name.ValueString() || saved.Enabled.IsUnknown() || !saved.Enabled.ValueBool() || !saved.RouterIndex.IsNull() {
 		t.Fatalf("ambiguous POST did not retain known recoverable state: %#v", saved)
+	}
+	if saved.Protocol != planned.Protocol || saved.ExternalPorts != planned.ExternalPorts || saved.InternalClient != planned.InternalClient || saved.TranslationPorts != planned.TranslationPorts || state.writes != 1 {
+		t.Fatalf("partial create lost arguments or retried: %+v", saved)
+	}
+	if mode == "placeholder" || mode == "reject-placeholder" || mode == "malformed" || mode == "duplicate" || mode == "read-failure" {
+		refresh := resource.ReadResponse{State: resp.State}
+		r.Read(ctx, resource.ReadRequest{State: resp.State}, &refresh)
+		if !refresh.Diagnostics.HasError() || !refresh.State.Raw.Equal(resp.State.Raw) || state.writes != 1 {
+			t.Fatal("failed refresh discarded recoverable state or mutated the router")
+		}
 	}
 }
 
@@ -228,6 +248,10 @@ type natMockState struct {
 	deletedIndex        int
 	logoutHadCurrentKey bool
 	badWriteResponse    bool
+	createMode          string
+	failSessionStart    bool
+	rejectLogin         bool
+	logouts             int
 }
 
 func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natMockState, func()) {
@@ -239,6 +263,10 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natM
 	state := &natMockState{rows: rows}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/GetInfoNoLogin", func(w http.ResponseWriter, _ *http.Request) {
+		if state.failSessionStart {
+			http.Error(w, "private raw body", http.StatusServiceUnavailable)
+			return
+		}
 		http.SetCookie(w, &http.Cookie{Name: "router", Value: "session", Path: "/"})
 	})
 	mux.HandleFunc("/getRSAPublickKey", func(w http.ResponseWriter, _ *http.Request) {
@@ -276,6 +304,10 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natM
 			return
 		}
 		state.sessionKey = "session-1"
+		if state.rejectLogin {
+			writeNATEncrypted(t, w, state.key, map[string]any{"result": "ACCESS_DENIED", "ReplyMsg": "private raw body"})
+			return
+		}
 		writeNATEncrypted(t, w, state.key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": state.sessionKey})
 	})
 	mux.HandleFunc("/cgi-bin/DAL", func(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +315,10 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natM
 			t.Errorf("request used stale session key")
 		}
 		if r.Method == http.MethodGet {
+			if state.writes > 0 && state.createMode == "read-failure" {
+				http.Error(w, "private raw body", http.StatusServiceUnavailable)
+				return
+			}
 			cloned := make([]any, len(state.rows))
 			for i, row := range state.rows {
 				cloned[i] = row
@@ -311,7 +347,44 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natM
 		}
 		state.writes++
 		if r.Method == http.MethodPost {
+			if !validNATCreateBody(state.lastBody) {
+				// Incomplete requests can allocate a row without populating it.
+				state.rows = append(state.rows, natRow(int64(len(state.rows)+1), "", "UDP", 0, 0, "", 0, 0, false))
+				writeNATEncrypted(t, w, state.key, map[string]any{"result": "ZCFG_INVALID_PARAM_VALUE"})
+				return
+			}
+			if state.createMode == "reject" {
+				writeNATEncrypted(t, w, state.key, map[string]any{"result": "ZCFG_INVALID_PARAM_VALUE"})
+				return
+			}
 			state.rows = append(state.rows, natRow(int64(len(state.rows)+1), state.lastBody["Description"].(string), state.lastBody["Protocol"].(string), int64(state.lastBody["ExternalPortStart"].(float64)), int64(state.lastBody["ExternalPortEnd"].(float64)), state.lastBody["InternalClient"].(string), int64(state.lastBody["InternalPortStart"].(float64)), int64(state.lastBody["InternalPortEnd"].(float64)), true))
+			switch state.createMode {
+			case "missing":
+				state.rows = state.rows[:len(state.rows)-1]
+			case "mismatch":
+				state.rows[len(state.rows)-1]["Enable"] = false
+			case "malformed":
+				state.rows[len(state.rows)-1]["InternalClient"] = float64(1)
+			case "duplicate":
+				state.rows = append(state.rows, natRow(int64(len(state.rows)+1), state.lastBody["Description"].(string), "TCP", 8000, 8000, "192.0.2.80", 9000, 9000, true))
+			case "placeholder", "reject-placeholder":
+				state.rows[len(state.rows)-1] = natRow(int64(len(state.rows)), "", "UDP", 0, 0, "", 0, 0, false)
+			case "http":
+				http.Error(w, "private raw body", http.StatusInternalServerError)
+				return
+			case "drop":
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_ = conn.Close()
+				return
+			}
+			if state.createMode == "reject-placeholder" {
+				writeNATEncrypted(t, w, state.key, map[string]any{"result": "ZCFG_INVALID_PARAM_VALUE"})
+				return
+			}
 		} else {
 			index, _ := strconv.Atoi(r.URL.Query().Get("Index"))
 			state.deletedIndex = index
@@ -327,9 +400,10 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natM
 			_, _ = w.Write([]byte("malformed encrypted write response"))
 			return
 		}
-		writeNATEncrypted(t, w, state.key, map[string]any{"result": "ZCFG_SUCCESS", "sessionkey": state.sessionKey})
+		writeNATEncrypted(t, w, state.key, map[string]any{"result": "ZCFG_SUCCESS", "ReplyMsg": "InternalClient", "sessionkey": state.sessionKey})
 	})
 	mux.HandleFunc("/cgi-bin/UserLogout", func(w http.ResponseWriter, r *http.Request) {
+		state.logouts++
 		state.logoutHadCurrentKey = r.URL.Query().Get("sessionkey") == state.sessionKey
 	})
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -346,6 +420,105 @@ func newNATMockClient(t *testing.T, rows []map[string]any) (*zyxel.Client, *natM
 		t.Fatal(err)
 	}
 	return client, state, server.Close
+}
+
+func TestNATCreateWireContractProtocolsAndRanges(t *testing.T) {
+	for _, protocol := range []string{"tcp", "udp", "both", "all"} {
+		for _, width := range []int64{0, 3} {
+			t.Run(fmt.Sprintf("%s/%d", protocol, width), func(t *testing.T) {
+				client, state, closeServer := newNATMockClient(t, nil)
+				defer closeServer()
+				rule := zyxel.NATRule{Name: "fixture", Protocol: protocol, ExternalPortStart: 8000, ExternalPortEnd: 8000 + width, InternalClient: "192.0.2.80", InternalPortStart: 9000, InternalPortEnd: 9000 + width}
+				created, err := client.CreateNATRule(context.Background(), rule)
+				if err != nil || !created || !validNATCreateBody(state.lastBody) || state.writes != 1 || !state.logoutHadCurrentKey {
+					t.Fatalf("create = %v, %v; state=%+v", created, err, state)
+				}
+				found, err := client.ReadNATRule(context.Background(), rule.Name)
+				if err != nil || found == nil || found.Protocol != protocol || found.ExternalPortEnd != rule.ExternalPortEnd || found.InternalPortEnd != rule.InternalPortEnd || found.InternalClient != rule.InternalClient || !found.Enabled {
+					t.Fatalf("readback = %+v, %v", found, err)
+				}
+			})
+		}
+	}
+}
+
+func TestNATFixtureRejectsFormerEightFieldPayload(t *testing.T) {
+	body := natRow(0, "fixture", "TCP", 8000, 8000, "192.0.2.80", 9000, 9000, true)
+	delete(body, "Index")
+	if validNATCreateBody(body) {
+		t.Fatal("former eight-field request passed wire regression")
+	}
+}
+
+func TestNATCreateFailureOutcomes(t *testing.T) {
+	for _, mode := range []string{"reject", "reject-placeholder", "missing", "mismatch", "malformed", "duplicate", "read-failure", "placeholder", "http", "drop"} {
+		t.Run(mode, func(t *testing.T) {
+			client, state, closeServer := newNATMockClient(t, nil)
+			defer closeServer()
+			state.createMode = mode
+			created, err := client.CreateNATRule(context.Background(), zyxel.NATRule{Name: "fixture", Protocol: "tcp", ExternalPortStart: 8000, ExternalPortEnd: 8000, InternalClient: "192.0.2.80", InternalPortStart: 9000, InternalPortEnd: 9000})
+			if err == nil || created != (mode != "reject") || state.writes != 1 || state.logouts != 1 {
+				t.Fatalf("create = %v, %v; writes=%d logouts=%d", created, err, state.writes, state.logouts)
+			}
+			for _, private := range []string{state.endpoint, "session-1", "rotated-", "private raw body", "sessionkey="} {
+				if strings.Contains(err.Error(), private) {
+					t.Fatalf("diagnostic leaked %q: %v", private, err)
+				}
+			}
+			if mode == "placeholder" || mode == "reject-placeholder" {
+				if _, err := client.ReadNATRule(context.Background(), "unrelated"); err == nil || state.writes != 1 || len(state.rows) != 1 {
+					t.Fatal("blank placeholder was ignored or automatically cleaned up")
+				}
+			}
+		})
+	}
+}
+
+func TestNATSequentialUncertainWriteThenPreAuthFailure(t *testing.T) {
+	client, state, closeServer := newNATMockClient(t, nil)
+	defer closeServer()
+	state.createMode = "drop"
+	rule := zyxel.NATRule{Name: "fixture", Protocol: "tcp", ExternalPortStart: 8000, ExternalPortEnd: 8000, InternalClient: "192.0.2.80", InternalPortStart: 9000, InternalPortEnd: 9000}
+	if created, err := client.CreateNATRule(context.Background(), rule); err == nil || !created {
+		t.Fatalf("uncertain create = %v, %v", created, err)
+	}
+	state.failSessionStart = true
+	if created, err := client.CreateNATRule(context.Background(), rule); err == nil || created || !strings.Contains(err.Error(), "credentials not submitted") || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("pre-auth failure = %v, %v", created, err)
+	}
+	if state.logins != 1 || state.writes != 1 || state.logouts != 1 {
+		t.Fatalf("unexpected retry or missing logout: %+v", state)
+	}
+	state.failSessionStart, state.rejectLogin = false, true
+	if _, err := client.ReadNATRule(context.Background(), rule.Name); err == nil || err.Error() != "router rejected login" {
+		t.Fatalf("credential rejection = %v", err)
+	}
+}
+
+// Validate the decrypted wire contract before constructing a valid router row.
+func validNATCreateBody(body map[string]any) bool {
+	if len(body) != 12 {
+		return false
+	}
+	for key, want := range map[string]any{
+		"Enable": true, "Interface": "", "SetRemoteIP": false,
+		"RemoteHost": "", "X_ZYXEL_AutoDetectWanStatus": true,
+	} {
+		if !reflect.DeepEqual(body[key], want) {
+			return false
+		}
+	}
+	for _, key := range []string{"Description", "Protocol", "InternalClient"} {
+		if _, ok := body[key].(string); !ok {
+			return false
+		}
+	}
+	for _, key := range []string{"ExternalPortStart", "ExternalPortEnd", "InternalPortStart", "InternalPortEnd"} {
+		if _, ok := body[key].(float64); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func natRow(index int64, name, protocol string, externalStart, externalEnd int64, internal string, internalStart, internalEnd int64, enabled bool) map[string]any {
