@@ -156,11 +156,11 @@ func (s *routerSession) writeDAL(ctx context.Context, method, oid, index string,
 
 func (s *routerSession) login(ctx context.Context) error {
 	if _, err := s.get(ctx, "/GetInfoNoLogin"); err != nil {
-		return errors.New("unable to start router session")
+		return fmt.Errorf("unable to start router session (pre-auth discovery; credentials not submitted): %w", err)
 	}
 	response, err := s.get(ctx, "/getRSAPublickKey")
 	if err != nil {
-		return errors.New("unable to retrieve router login key")
+		return fmt.Errorf("unable to retrieve router login key (pre-auth key retrieval): %w", err)
 	}
 	var publicKeyResponse struct {
 		PublicKey string `json:"RSAPublicKey"`
@@ -207,7 +207,7 @@ func (s *routerSession) login(ctx context.Context) error {
 	body, _ := json.Marshal(encryptedPayload{Content: base64.StdEncoding.EncodeToString(ciphertext), Key: base64.StdEncoding.EncodeToString(encryptedKey), IV: base64.StdEncoding.EncodeToString(iv)})
 	response, err = s.request(ctx, http.MethodPost, "/UserLogin", body, "application/json")
 	if err != nil {
-		return errors.New("router login request failed")
+		return fmt.Errorf("router login request failed (credential submission): %w", err)
 	}
 	result, err := s.decryptResponse(response)
 	if err != nil {

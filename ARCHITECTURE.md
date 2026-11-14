@@ -111,6 +111,33 @@ an explicit architecture decision, documentation update, and matching tests.
 - Do not add undocumented PUT, toggling, reorder, or bulk replacement behavior.
   Extraction does not authorize hardware writes or expand firmware support.
 
+### NAT Create Payload Decision
+
+NAT POST adds four explicit fields to the eight managed fields:
+`Interface: ""`, `X_ZYXEL_AutoDetectWanStatus: true`, `SetRemoteIP: false`, and
+`RemoteHost: ""`. InternalClient remains a string. This selects automatic
+default WAN and unrestricted remote sources without new schema options.
+
+Evidence: controlled creates with a larger UI-style object succeeded with exact
+enabled TCP single-port/range readback. That object also included `Index: 0`,
+`referenceIndex: -1`, `DefaultPort: ""`, `RemoteHostEndRange: "255.255.255.255"`,
+and `WANIP: ""`. The experiments did not isolate necessary fields. The
+[independent client](https://github.com/okke-formsma/zyxelctl/blob/bcba3b5de3b8b7d78bfc432f0d95626a45e369de/src/zyxelctl/client.py),
+checked during this change, supplies the selected four fields but defaults to
+inferred/explicit interface selection and automatic detection disabled. It
+supports field names and types, not this firmware's behavior or our defaults.
+We omit UI indexes/bookkeeping and disabled range/WAN overrides rather than
+claim they are required. The four-field subset still needs separate hardware
+validation; no hardware access is authorized by this decision. `ReplyMsg:
+InternalClient` alone is not a failure and does not imply a numeric address.
+
+Encrypted regression peers validate decrypted keys/types before populating a
+row, including default-WAN/remote fields. NAT create preserves possible-creation
+on transport/HTTP uncertainty and failed confirmation. After DAL rejection it
+reads without retrying: only an unchanged, valid complete table excludes an
+observable partial write. Failed/malformed/changed readback retains uncertainty,
+including blank placeholders. No row is ignored, adopted, or cleaned up.
+
 ### Ordered ACL Policy Decision
 
 `zyxel_acl_policy` owns a contiguous tail ordered as `management_rules`
@@ -156,6 +183,9 @@ available.
 
 Unrelated prefix rules must be accepts; operators must ensure they do not bypass
 the policy denies. Out-of-process writers remain unsupported during operations.
+
+A replacement safety design is proposed in `design/acl-safe-reconciliation.md`.
+It is not approved or implemented; the deny-removal warning above still applies.
 
 ## Development Pattern
 

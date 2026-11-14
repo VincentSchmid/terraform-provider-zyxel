@@ -137,6 +137,92 @@ func TestAccACLPolicy_serviceRules(t *testing.T) {
 	}
 }
 
+func TestAccACLPolicy_serviceCreateBeforeDestroyReplacement(t *testing.T) {
+	if !testingAcceptanceEnabled() {
+		t.Skip("set TF_ACC=1 for local mock acceptance tests")
+	}
+	for _, failure := range []string{"none", "policy", "unmanaged-reference"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newTerraformACLFixture(t)
+			f.compactOrders = true
+			initial := strings.Replace(policyServiceTestConfig(f.server.URL, `["198.51.100.0/24"]`), `name = "policy-https"`, "name = \"policy-https\"\n lifecycle { create_before_destroy = true }", 1)
+			replacement := strings.Replace(initial, `name = "policy-https"`, `name = "policy-https-next"`, 1)
+			checkSwitched := func(_ *terraform.State) error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if len(f.services) != 1 || f.services[0]["Name"] != "policy-https-next" || fixtureInt(f.services[0]["Iid"]) != 102 {
+					return fmt.Errorf("successor did not survive current-index predecessor deletion: %v", f.services)
+				}
+				for _, row := range f.rows[1:] {
+					if row["Direction"] != "LAN_TO_ROUTER" && fixtureInt(row["X_ZYXEL_ServiceIndex"]) != 102 {
+						return fmt.Errorf("ACL did not switch native service identity: %v", row)
+					}
+				}
+				want := "create:101,reference:101,reference:101,create:102,reference:102,reference:102,delete:101"
+				if got := strings.Join(f.serviceEvents, ","); got != want {
+					return fmt.Errorf("unsafe service event sequence: %s; want %s", got, want)
+				}
+				if f.serviceDeleteBlocked != 0 {
+					return fmt.Errorf("API reached router deletion with live references")
+				}
+				return nil
+			}
+			step := resource.TestStep{Config: replacement, Check: checkSwitched}
+			steps := []resource.TestStep{{Config: initial}}
+			if failure != "none" {
+				step.Check = nil
+				step.PreConfig = func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					if failure == "policy" {
+						f.failPostAt = f.posts + 1
+					} else {
+						f.rows[0]["X_ZYXEL_ServiceIndex"] = 101
+					}
+				}
+				if failure == "policy" {
+					step.ExpectError = regexp.MustCompile("500|ambiguous")
+				} else {
+					step.ExpectError = regexp.MustCompile("referenced")
+				}
+				steps = append(steps, step)
+				steps = append(steps, resource.TestStep{Config: replacement, PreConfig: func() {
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					if len(f.services) != 2 || f.serviceDeleteAttempts != 0 {
+						t.Errorf("failed switch did not preserve both services: %v; delete attempts=%d", f.services, f.serviceDeleteAttempts)
+					}
+					f.failPostAt = 0
+					f.rows[0]["X_ZYXEL_ServiceIndex"] = 0
+				}, Check: func(s *terraform.State) error {
+					// Partial reconciliation may recreate an already committed ACL row;
+					// verify ordering without assuming its event count.
+					f.mu.Lock()
+					if len(f.services) != 1 || fixtureInt(f.services[0]["Iid"]) != 102 || f.serviceDeleteBlocked != 0 || f.serviceEvents[len(f.serviceEvents)-1] != "delete:101" {
+						f.mu.Unlock()
+						return fmt.Errorf("unsafe recovery service sequence: %v", f.serviceEvents)
+					}
+					for _, row := range f.rows[1:] {
+						if row["Direction"] != "LAN_TO_ROUTER" && fixtureInt(row["X_ZYXEL_ServiceIndex"]) != 102 {
+							f.mu.Unlock()
+							return fmt.Errorf("recovery left predecessor reference")
+						}
+					}
+					f.mu.Unlock()
+					return nil
+				}})
+			} else {
+				steps = append(steps, step)
+			}
+			steps = append(steps, resource.TestStep{Config: replacement, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}})
+			resource.Test(t, resource.TestCase{ProtoV6ProviderFactories: aclTestFactories, Steps: steps})
+			if len(f.rows) != 1 || f.rows[0]["Name"] != "unmanaged" || len(f.services) != 0 {
+				t.Fatal("replacement cleanup changed unrelated prefix or leaked services")
+			}
+		})
+	}
+}
+
 func policyFilterTestConfig(endpoint, fields string) string {
 	return fmt.Sprintf(`
 provider "zyxel" {

@@ -70,7 +70,7 @@ func (c *Client) CreateNATRule(ctx context.Context, rule NATRule) (bool, error) 
 	err := c.withSession(ctx, func(s *routerSession) error {
 		rows, err := s.readNATRules(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("NAT create preflight: %w", err)
 		}
 		for _, row := range rows {
 			if row.Name == rule.Name {
@@ -85,25 +85,44 @@ func (c *Client) CreateNATRule(ctx context.Context, rule NATRule) (bool, error) 
 			"ExternalPortStart": rule.ExternalPortStart, "ExternalPortEnd": rule.ExternalPortEnd,
 			"InternalClient": rule.InternalClient, "InternalPortStart": rule.InternalPortStart,
 			"InternalPortEnd": rule.InternalPortEnd,
+			"Interface":       "", "X_ZYXEL_AutoDetectWanStatus": true,
+			"SetRemoteIP": false, "RemoteHost": "",
 		})
 		if err != nil {
 			var ambiguous *AmbiguousWriteError
-			if errors.As(err, &ambiguous) {
+			var status *responseStatusError
+			if errors.As(err, &ambiguous) || errors.As(err, &status) {
 				created = true
+				return fmt.Errorf("NAT create write (may have applied; reconcile before retrying): %w", err)
 			}
-			return err
+			return fmt.Errorf("NAT create write: %w", err)
 		}
 		if result["result"] != "ZCFG_SUCCESS" {
+			// A DAL rejection need not roll back row allocation. Only an unchanged,
+			// valid table confirms rejection without an observable partial write.
+			observed, readErr := s.readNATRules(ctx)
+			created = readErr != nil || len(observed) != len(rows)
+			if !created {
+				for i := range rows {
+					if rows[i] != observed[i] {
+						created = true
+						break
+					}
+				}
+			}
+			if created {
+				return errors.New("NAT create rejected; partial write cannot be excluded; inspect the NAT table before retrying")
+			}
 			return errors.New("router rejected the NAT rule create request")
 		}
 		created = true
 		rows, err = s.readNATRules(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("NAT create readback: %w", err)
 		}
 		found, err := findNATRule(rows, rule.Name)
 		if err != nil {
-			return err
+			return fmt.Errorf("NAT create readback: %w", err)
 		}
 		if found == nil || !sameNATConfiguration(*found, rule) || !found.Enabled {
 			return errors.New("NAT rule create could not be confirmed by readback")
@@ -196,8 +215,7 @@ func (s *routerSession) readNATRules(ctx context.Context) ([]NATRule, error) {
 }
 
 func parseNATRule(row map[string]any) (NATRule, error) {
-	// Firmware can attach unrelated metadata to each row. Ignore it because the
-	// router's supported create payload omits interface-specific settings.
+	// Only project managed fields; unrelated firmware metadata is not identity.
 	index, indexOK := routerIndexValue(row["Index"])
 	enabled, enabledOK := row["Enable"].(bool)
 	name, nameOK := row["Description"].(string)

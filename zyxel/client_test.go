@@ -219,3 +219,32 @@ func TestNewClientValidatesConfigurationWithoutNetwork(t *testing.T) {
 		}
 	}
 }
+
+func TestPreAuthDiscoveryFailureIsSanitizedAndDoesNotSubmitCredentials(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != "/GetInfoNoLogin" {
+					t.Error("submitted credentials or retried after discovery failure")
+				}
+				http.Error(w, "private-cookie private-session private-password", status)
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, Credentials{Username: "private-user", Password: "private-password"}, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.ReadStatus(context.Background())
+			if err == nil || requests != 1 || !strings.Contains(err.Error(), "credentials not submitted") || !strings.Contains(err.Error(), fmt.Sprint(status)) {
+				t.Fatalf("discovery failure = %v; requests=%d", err, requests)
+			}
+			for _, private := range []string{server.URL, "private-cookie", "private-session", "private-password", "private-user"} {
+				if strings.Contains(err.Error(), private) {
+					t.Fatalf("discovery error leaked %q", private)
+				}
+			}
+		})
+	}
+}

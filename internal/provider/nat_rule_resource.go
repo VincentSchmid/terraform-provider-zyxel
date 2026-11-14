@@ -48,7 +48,7 @@ func (r *NATRuleResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	portValidators := []validator.String{natPortsValidator{}}
 	resp.Schema = schema.Schema{
 		Version:             1,
-		MarkdownDescription: "Manages one supported router NAT rule. The router has no verified in-place update operation, so changes replace the rule. Existing rules must be imported by exact name. Enabled rules cannot overlap external ports for an intersecting protocol; disabled rules do not reserve ports. The create payload omits interface-specific settings and lets the router choose its defaults.",
+		MarkdownDescription: "Manages one supported router NAT rule. The router has no verified in-place update operation, so changes replace the rule. Existing rules must be imported by exact name. Enabled rules cannot overlap external ports for an intersecting protocol; disabled rules do not reserve ports. Creation explicitly selects automatic default-WAN detection and unrestricted remote sources; interface and remote-source selection are not configurable.",
 		Attributes: map[string]schema.Attribute{
 			"name":              schema.StringAttribute{Required: true, MarkdownDescription: "Exact, nonempty router description. This is the natural identity and import key; leading and trailing whitespace are not allowed.", PlanModifiers: replaceString, Validators: []validator.String{natNameValidator{}}},
 			"protocol":          schema.StringAttribute{Required: true, MarkdownDescription: "Transport protocol: `tcp`, `udp`, `both`, or `all`. The router stores these as `TCP`, `UDP`, `TCP+UDP`, or `ALL`; `all` forwards every protocol, which is not the same as `both`.", PlanModifiers: replaceString, Validators: []validator.String{natProtocolValidator{}}},
@@ -119,7 +119,11 @@ func (r *NATRuleResource) Create(ctx context.Context, req resource.CreateRequest
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 	}
 	if err != nil {
-		resp.Diagnostics.AddError("Error creating NAT rule", fmt.Sprintf("creating NAT rule (%s): %s", plan.Name.ValueString(), err))
+		detail := fmt.Sprintf("creating NAT rule (%s): %s", plan.Name.ValueString(), err)
+		if created {
+			detail += ". Creation succeeded or may have partially succeeded; the planned identity is retained for recovery, not proof of a valid row. Inspect and reconcile the NAT table before retrying. Do not blindly retry, untaint, or delete unnamed rows."
+		}
+		resp.Diagnostics.AddError("Error creating NAT rule", detail)
 		return
 	}
 	found, err := r.client.ReadNATRule(ctx, plan.Name.ValueString())
